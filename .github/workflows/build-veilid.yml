@@ -412,7 +412,7 @@ jobs:
   # ============================================================
   create-release:
     name: Create Release
-    needs: [build-linux-x64, build-windows-x64, build-macos-x64, build-macos-arm64]
+    needs: [build-linux-x64, build-windows-x64, build-macos-arm64]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -430,7 +430,7 @@ jobs:
           # Move all artifacts to release folder
           cp artifacts/veilid-linux-x64/* release/
           cp artifacts/veilid-windows-x64/* release/
-          cp artifacts/veilid-macos-x64/* release/
+          # cp artifacts/veilid-macos-x64/* release/ # DISABLED - build optional
           cp artifacts/veilid-macos-arm64/* release/
           
           # Create combined manifest fragment for installer
@@ -474,12 +474,12 @@ jobs:
           # Replace SHA256 placeholders with actual values
           LINUX_SHA=$(cat veilid-linux-x64.tar.gz.sha256 | awk '{print $1}')
           WINDOWS_SHA=$(cat veilid-windows-x64.zip.sha256 | awk '{print $1}')
-          MACOS_X64_SHA=$(cat veilid-macos-x64.tar.gz.sha256 | awk '{print $1}')
+          # MACOS_X64_SHA disabled - build optional
           MACOS_ARM64_SHA=$(cat veilid-macos-arm64.tar.gz.sha256 | awk '{print $1}')
           
           sed -i "s/LINUX_SHA256/$LINUX_SHA/g" manifest-fragment.json
           sed -i "s/WINDOWS_SHA256/$WINDOWS_SHA/g" manifest-fragment.json
-          sed -i "s/MACOS_X64_SHA256/$MACOS_X64_SHA/g" manifest-fragment.json
+          # sed -i "s/MACOS_X64_SHA256/$MACOS_X64_SHA/g" manifest-fragment.json  # DISABLED
           sed -i "s/MACOS_ARM64_SHA256/$MACOS_ARM64_SHA/g" manifest-fragment.json
           
           echo "=== Manifest Fragment ==="
@@ -517,8 +517,8 @@ jobs:
             release/veilid-linux-x64.tar.gz.sha256
             release/veilid-windows-x64.zip
             release/veilid-windows-x64.zip.sha256
-            release/veilid-macos-x64.tar.gz
-            release/veilid-macos-x64.tar.gz.sha256
+            # release/veilid-macos-x64.tar.gz  # DISABLED
+            # release/veilid-macos-x64.tar.gz.sha256  # DISABLED
             release/veilid-macos-arm64.tar.gz
             release/veilid-macos-arm64.tar.gz.sha256
             release/manifest-fragment.json
