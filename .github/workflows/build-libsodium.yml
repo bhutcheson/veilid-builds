@@ -1,0 +1,311 @@
+# .github/workflows/build-libsodium.yml
+#
+# Build libsodium shared libraries for Kunuleco distribution (K-1 / D16).
+#
+# WHY THIS EXISTS
+# ---------------
+# keri depends on pysodium, which is an sdist-only ctypes binding whose entire
+# loader is:
+#
+#     ctypes.cdll.LoadLibrary(ctypes.util.find_library('sodium') or
+#                             ctypes.util.find_library('libsodium'))
+#
+# find_library searches SYSTEM paths. Windows has nothing, macOS has nothing
+# without brew, Linux depends on the distro. PyNaCl cannot stand in for it:
+# PyNaCl STATICALLY links libsodium into _sodium.abi3.so, so there is no
+# separate library file for find_library to return. So we ship our own.
+#
+# ⚠️ Upstream publishes a prebuilt for WINDOWS ONLY. macOS and Linux are built
+# from source here. That asymmetry is why Windows is a fetch-and-repackage job
+# rather than a build job -- deliberately, so all four platforms land in ONE
+# release with one set of hashes for the manifest.
+#
+# ⚠️ SUPPLY CHAIN: the source tarball is verified with minisign against
+# libsodium's published public key before anything is built. There is NO
+# fallback path -- a verification you can skip is not a verification.
+#
+# ⚠️ EVERY JOB PROVES THE ARTIFACT, it does not just produce it: each one loads
+# the library it just built through pysodium's exact loader line and performs a
+# real crypto_sign keypair + sign + verify. A file that exists is not evidence
+# that it works, and D16's probe already produced one false pass by resolving
+# the SYSTEM library instead of the staged copy.
+
+name: Build libsodium Binaries
+
+on:
+  workflow_dispatch:
+    inputs:
+      libsodium_version:
+        description: 'libsodium stable version (e.g. 1.0.20)'
+        required: true
+        default: '1.0.20'
+        type: string
+      release_tag:
+        description: 'Tag for the release (e.g. libsodium-1.0.20-kunuleco.1)'
+        required: true
+        type: string
+      prerelease:
+        description: 'Mark as prerelease'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  # libsodium's published minisign public key. Documented at
+  # https://download.libsodium.org/doc/installation -- pinned here so a
+  # compromised download page cannot also supply the key that validates it.
+  LIBSODIUM_MINISIGN_KEY: 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3'
+  BASE_URL: 'https://download.libsodium.org/libsodium/releases'
+
+jobs:
+  # ============================================================
+  # Linux x64 — build from verified source
+  # ============================================================
+  build-linux-x64:
+    name: Build Linux x64
+    runs-on: ubuntu-22.04
+    steps:
+      # Needed for .github/scripts/prove_libsodium.py -- the build steps below
+      # fetch libsodium's source, not this repository.
+      - uses: actions/checkout@v4
+
+      - name: Install minisign
+        run: sudo apt-get update -qq && sudo apt-get install -y minisign
+
+      - name: Download and VERIFY source
+        run: |
+          set -euo pipefail
+          V="${{ inputs.libsodium_version }}"
+          curl -fsSLO "${BASE_URL}/libsodium-${V}-stable.tar.gz"
+          curl -fsSLO "${BASE_URL}/libsodium-${V}-stable.tar.gz.minisig"
+          # Fails the job if the signature does not verify. No fallback.
+          minisign -Vm "libsodium-${V}-stable.tar.gz" -P "${LIBSODIUM_MINISIGN_KEY}"
+          echo "SOURCE_SHA256=$(sha256sum libsodium-${V}-stable.tar.gz | awk '{print $1}')" >> $GITHUB_ENV
+          tar xzf "libsodium-${V}-stable.tar.gz"
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          cd libsodium-stable
+          ./configure --prefix="$PWD/../out" --disable-static
+          make -j"$(nproc)"
+          make check
+          make install
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p dist/libsodium-linux-x64
+          # ⚠️ Ship the SONAME-named file. dlopen by absolute path does not need
+          # the search path, but the loader still records the SONAME, so keeping
+          # the canonical name means a later request for libsodium.so.23 is
+          # satisfied by the copy we already loaded rather than a system one.
+          SO="$(readlink -f out/lib/libsodium.so)"
+          SONAME="$(objdump -p "$SO" | awk '/SONAME/{print $2}')"
+          echo "SONAME=$SONAME"
+          cp "$SO" "dist/libsodium-linux-x64/${SONAME}"
+          cat > dist/libsodium-linux-x64/BUILD_INFO.json << EOF
+          {
+            "version": "${{ inputs.libsodium_version }}",
+            "platform": "linux-x64",
+            "soname": "${SONAME}",
+            "source_sha256": "${SOURCE_SHA256}",
+            "source": "${BASE_URL}/libsodium-${{ inputs.libsodium_version }}-stable.tar.gz",
+            "signature_verified": "minisign",
+            "build_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+
+      - name: PROVE it loads and does crypto
+        run: python3 .github/scripts/prove_libsodium.py "dist/libsodium-linux-x64"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libsodium-linux-x64
+          path: dist/libsodium-linux-x64
+
+  # ============================================================
+  # macOS x64 / ARM64 — build from verified source
+  # ============================================================
+  build-macos:
+    name: Build ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ⚠️ macos-13 is RETIRED: a job targeting it queues for exactly 24h
+          # and auto-cancels, which reads as "still running" all day.
+          - os: macos-15-intel
+            label: macOS x64
+            slug: macos-x64
+          - os: macos-14
+            label: macOS ARM64
+            slug: macos-arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install minisign
+        run: brew install minisign
+
+      - name: Download and VERIFY source
+        run: |
+          set -euo pipefail
+          V="${{ inputs.libsodium_version }}"
+          curl -fsSLO "${BASE_URL}/libsodium-${V}-stable.tar.gz"
+          curl -fsSLO "${BASE_URL}/libsodium-${V}-stable.tar.gz.minisig"
+          minisign -Vm "libsodium-${V}-stable.tar.gz" -P "${LIBSODIUM_MINISIGN_KEY}"
+          echo "SOURCE_SHA256=$(shasum -a 256 libsodium-${V}-stable.tar.gz | awk '{print $1}')" >> $GITHUB_ENV
+          tar xzf "libsodium-${V}-stable.tar.gz"
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          cd libsodium-stable
+          ./configure --prefix="$PWD/../out" --disable-static
+          make -j"$(sysctl -n hw.ncpu)"
+          make check
+          make install
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/libsodium-${{ matrix.slug }}"
+          # The hook looks for libsodium.dylib by that exact name.
+          cp "$(readlink out/lib/libsodium.dylib || echo out/lib/libsodium.dylib)" \
+             "dist/libsodium-${{ matrix.slug }}/libsodium.dylib" 2>/dev/null \
+             || cp out/lib/libsodium.dylib "dist/libsodium-${{ matrix.slug }}/libsodium.dylib"
+          # ⚠️ arm64 macOS requires a signature on any loadable code. The linker
+          # applies an ad-hoc one automatically for anything built here, which is
+          # exactly why we BUILD rather than fetch a third-party prebuilt. Assert
+          # it rather than assume it.
+          codesign -dv "dist/libsodium-${{ matrix.slug }}/libsodium.dylib" 2>&1 | head -5
+          cat > "dist/libsodium-${{ matrix.slug }}/BUILD_INFO.json" << EOF
+          {
+            "version": "${{ inputs.libsodium_version }}",
+            "platform": "${{ matrix.slug }}",
+            "source_sha256": "${SOURCE_SHA256}",
+            "source": "${BASE_URL}/libsodium-${{ inputs.libsodium_version }}-stable.tar.gz",
+            "signature_verified": "minisign",
+            "build_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+
+      - name: PROVE it loads and does crypto
+        run: python3 .github/scripts/prove_libsodium.py "dist/libsodium-${{ matrix.slug }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libsodium-${{ matrix.slug }}
+          path: dist/libsodium-${{ matrix.slug }}
+
+  # ============================================================
+  # Windows x64 — repackage the OFFICIAL prebuilt
+  # ============================================================
+  # Upstream ships an MSVC build for Windows and no source build is needed.
+  # It is repackaged here rather than referenced directly so that all four
+  # platforms come from one release with one set of hashes the manifest can pin.
+  build-windows-x64:
+    name: Repackage Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download official MSVC build
+        shell: bash
+        run: |
+          set -euo pipefail
+          V="${{ inputs.libsodium_version }}"
+          curl -fsSLO "${BASE_URL}/libsodium-${V}-stable-msvc.zip"
+          echo "SOURCE_SHA256=$(sha256sum libsodium-${V}-stable-msvc.zip | awk '{print $1}')" >> $GITHUB_ENV
+          unzip -q "libsodium-${V}-stable-msvc.zip"
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/libsodium-windows-x64
+          # x64 dynamic Release build. The DLL must ship under exactly the name
+          # `libsodium.dll` -- that is what the loader hook resolves to.
+          DLL="$(find libsodium -ipath '*x64*Release*dynamic*' -name 'libsodium.dll' | head -1)"
+          test -n "$DLL" || { echo "libsodium.dll not found in the msvc zip"; exit 1; }
+          echo "using $DLL"
+          cp "$DLL" dist/libsodium-windows-x64/libsodium.dll
+          cat > dist/libsodium-windows-x64/BUILD_INFO.json << EOF
+          {
+            "version": "${{ inputs.libsodium_version }}",
+            "platform": "windows-x64",
+            "source_sha256": "${SOURCE_SHA256}",
+            "source": "${BASE_URL}/libsodium-${{ inputs.libsodium_version }}-stable-msvc.zip",
+            "signature_verified": "none -- official upstream MSVC build, sha256 recorded",
+            "build_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+
+      - name: PROVE it loads and does crypto
+        shell: bash
+        run: python .github/scripts/prove_libsodium.py "dist/libsodium-windows-x64"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libsodium-windows-x64
+          path: dist/libsodium-windows-x64
+
+  # ============================================================
+  # Release
+  # ============================================================
+  create-release:
+    name: Create Release
+    needs: [build-linux-x64, build-macos, build-windows-x64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Package and hash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          for p in linux-x64 macos-x64 macos-arm64; do
+            tar czf "release/libsodium-${p}.tar.gz" -C "artifacts/libsodium-${p}" .
+          done
+          (cd "artifacts/libsodium-windows-x64" && zip -qr "../../release/libsodium-windows-x64.zip" .)
+          cd release
+          # These are the hashes that go into installer/manifests/stable.json.
+          # ⚠️ Do NOT hand-copy them: the manifest's validator rejects a
+          # placeholder, and signing_enforced() is True, so a wrong hash fails
+          # CLOSED at install time rather than warning.
+          sha256sum * | tee SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          name: "libsodium ${{ inputs.libsodium_version }} for Kunuleco"
+          prerelease: ${{ inputs.prerelease || false }}
+          files: release/*
+          body: |
+            ## libsodium for Kunuleco (K-1 / D16)
+
+            Shipped so `pysodium` — and therefore `keri` — can resolve libsodium
+            on machines that do not have one. Windows never has one; macOS has
+            none without brew; Linux depends on the distro.
+
+            Source tarballs were verified with **minisign** against libsodium's
+            published key before building. Windows is the official upstream MSVC
+            build, repackaged so all four platforms share one release.
+
+            **Every artifact was loaded through pysodium's own loader line and
+            performed a real crypto_sign keypair/sign/verify in CI before
+            release.** A file that exists is not evidence that it works.
+
+            | Platform | File |
+            |---|---|
+            | Linux x64 | `libsodium-linux-x64.tar.gz` |
+            | macOS x64 | `libsodium-macos-x64.tar.gz` |
+            | macOS ARM64 | `libsodium-macos-arm64.tar.gz` |
+            | Windows x64 | `libsodium-windows-x64.zip` |
+
+            `SHA256SUMS.txt` holds the hashes for `installer/manifests/stable.json`.
