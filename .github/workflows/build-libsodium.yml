@@ -69,20 +69,15 @@ jobs:
       # fetch libsodium's source, not this repository.
       - uses: actions/checkout@v4
 
-      - name: Install minisign
-        # ⚠️ Was `apt-get update -qq && apt-get install -y minisign`, which failed
-        # the job in 15s with the reason hidden by -qq. minisign IS packaged for
-        # jammy (universe, and jammy-updates/backports), so the package was never
-        # the problem -- the `update` leg was, and `&&` turned a transient index
-        # error into a hard failure with no diagnostic.
-        #
-        # Try the install first in case the index is already warm, fall back to
-        # a refresh, and keep the output so a future failure says why.
-        run: |
-          set -euo pipefail
-          sudo apt-get install -y minisign \
-            || { sudo apt-get update && sudo apt-get install -y minisign; }
-          minisign -v
+      - name: Install PyNaCl (signature verification)
+        # ⚠️ NOT `apt-get install minisign`. minisign is NOT in the
+        # ubuntu-22.04 runner's enabled suites -- `E: Unable to locate package
+        # minisign` -- and 22.04 is not negotiable as the build host, because
+        # building on a newer glibc yields a .so that will not load on older
+        # distributions. Installing a prebuilt minisign to verify a download
+        # only moves the trust problem to another binary, so the Ed25519 check
+        # is done directly. See .github/scripts/verify_minisign.py.
+        run: python3 -m pip install --quiet pynacl
 
       - name: Download and VERIFY source
         run: |
@@ -91,7 +86,10 @@ jobs:
           curl -fsSLO "${BASE_URL}/libsodium-${V}-stable.tar.gz"
           curl -fsSLO "${BASE_URL}/libsodium-${V}-stable.tar.gz.minisig"
           # Fails the job if the signature does not verify. No fallback.
-          minisign -Vm "libsodium-${V}-stable.tar.gz" -P "${LIBSODIUM_MINISIGN_KEY}"
+          python3 .github/scripts/verify_minisign.py \
+            "libsodium-${V}-stable.tar.gz" \
+            "libsodium-${V}-stable.tar.gz.minisig" \
+            "${LIBSODIUM_MINISIGN_KEY}"
           echo "SOURCE_SHA256=$(sha256sum libsodium-${V}-stable.tar.gz | awk '{print $1}')" >> $GITHUB_ENV
           tar xzf "libsodium-${V}-stable.tar.gz"
 
@@ -157,8 +155,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install minisign
-        run: brew install minisign
+      - name: Install PyNaCl (signature verification)
+        run: python3 -m pip install --quiet pynacl
 
       - name: Download and VERIFY source
         run: |
@@ -166,7 +164,10 @@ jobs:
           V="${{ inputs.libsodium_version }}"
           curl -fsSLO "${BASE_URL}/libsodium-${V}-stable.tar.gz"
           curl -fsSLO "${BASE_URL}/libsodium-${V}-stable.tar.gz.minisig"
-          minisign -Vm "libsodium-${V}-stable.tar.gz" -P "${LIBSODIUM_MINISIGN_KEY}"
+          python3 .github/scripts/verify_minisign.py \
+            "libsodium-${V}-stable.tar.gz" \
+            "libsodium-${V}-stable.tar.gz.minisig" \
+            "${LIBSODIUM_MINISIGN_KEY}"
           echo "SOURCE_SHA256=$(shasum -a 256 libsodium-${V}-stable.tar.gz | awk '{print $1}')" >> $GITHUB_ENV
           tar xzf "libsodium-${V}-stable.tar.gz"
 
@@ -187,11 +188,18 @@ jobs:
           cp "$(readlink out/lib/libsodium.dylib || echo out/lib/libsodium.dylib)" \
              "dist/libsodium-${{ matrix.slug }}/libsodium.dylib" 2>/dev/null \
              || cp out/lib/libsodium.dylib "dist/libsodium-${{ matrix.slug }}/libsodium.dylib"
-          # ⚠️ arm64 macOS requires a signature on any loadable code. The linker
-          # applies an ad-hoc one automatically for anything built here, which is
-          # exactly why we BUILD rather than fetch a third-party prebuilt. Assert
-          # it rather than assume it.
-          codesign -dv "dist/libsodium-${{ matrix.slug }}/libsodium.dylib" 2>&1 | head -5
+          # ⚠️ arm64 macOS REQUIRES a signature on loadable code and the linker
+          # applies an ad-hoc one; x86_64 does NOT require one and does not get
+          # one. Asserting "signed" on both was wrong and failed the x64 job on a
+          # perfectly good artifact -- "code object is not signed at all" was an
+          # accurate report of an expected state.
+          DYLIB="dist/libsodium-${{ matrix.slug }}/libsodium.dylib"
+          if [ "${{ matrix.slug }}" = "macos-arm64" ]; then
+            codesign -dv "$DYLIB" 2>&1 | head -3
+          else
+            codesign -dv "$DYLIB" 2>&1 | head -3 \
+              || echo "  (x86_64: unsigned is expected; only arm64 mandates it)"
+          fi
           cat > "dist/libsodium-${{ matrix.slug }}/BUILD_INFO.json" << EOF
           {
             "version": "${{ inputs.libsodium_version }}",
@@ -223,12 +231,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download official MSVC build
+      - name: Install PyNaCl (signature verification)
+        run: python -m pip install --quiet pynacl
+
+      - name: Download and VERIFY official MSVC build
         shell: bash
         run: |
           set -euo pipefail
           V="${{ inputs.libsodium_version }}"
           curl -fsSLO "${BASE_URL}/libsodium-${V}-stable-msvc.zip"
+          # ⚠️ The msvc zip IS minisign-signed (confirmed, not assumed), so
+          # Windows gets the same check as the source builds. Recording a
+          # sha256 of whatever arrived is not verification -- it attests to the
+          # bytes we got, not to who produced them.
+          curl -fsSLO "${BASE_URL}/libsodium-${V}-stable-msvc.zip.minisig"
+          python .github/scripts/verify_minisign.py \
+            "libsodium-${V}-stable-msvc.zip" \
+            "libsodium-${V}-stable-msvc.zip.minisig" \
+            "${LIBSODIUM_MINISIGN_KEY}"
           echo "SOURCE_SHA256=$(sha256sum libsodium-${V}-stable-msvc.zip | awk '{print $1}')" >> $GITHUB_ENV
           unzip -q "libsodium-${V}-stable-msvc.zip"
 
@@ -249,7 +269,7 @@ jobs:
             "platform": "windows-x64",
             "source_sha256": "${SOURCE_SHA256}",
             "source": "${BASE_URL}/libsodium-${{ inputs.libsodium_version }}-stable-msvc.zip",
-            "signature_verified": "none -- official upstream MSVC build, sha256 recorded",
+            "signature_verified": "minisign",
             "build_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           }
           EOF
