@@ -69,6 +69,10 @@ jobs:
       # fetch libsodium's source, not this repository.
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Install PyNaCl (signature verification)
         # ⚠️ NOT `apt-get install minisign`. minisign is NOT in the
         # ubuntu-22.04 runner's enabled suites -- `E: Unable to locate package
@@ -155,6 +159,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Install PyNaCl (signature verification)
         run: python3 -m pip install --quiet pynacl
 
@@ -230,6 +238,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
       - name: Install PyNaCl (signature verification)
         run: python -m pip install --quiet pynacl
