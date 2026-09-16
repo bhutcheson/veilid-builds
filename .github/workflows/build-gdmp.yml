@@ -338,6 +338,28 @@ jobs:
           curl -sL -o proj/portrait.jpg "${{ env.PORTRAIT_URL }}"
           ls -la proj
 
+      # 🔴 **THE FIRST RUN OF THIS JOB FOUND SOMETHING, WHICH IS WHY IT EXISTS.**
+      # The freshly built `libGDMP.linux.so` would not load on a bare runner:
+      #
+      #     Can't open dynamic library: .../libGDMP.linux.so
+      #     Error: libGLESv2.so.2: cannot open shared object file
+      #
+      # MediaPipe's GPU path links GLES, so the artifact needs an EGL/GLES
+      # runtime present to load at all. ⚠️ **On a desktop with graphics drivers
+      # it is already there** — which is why the same class of library loaded
+      # fine on a developer machine and not here — **but "it works on a box that
+      # happens to have Mesa" is not a property of the artifact.** So the
+      # dependency is installed deliberately AND printed, rather than inherited
+      # from whatever the runner image happens to carry.
+      - name: Runtime dependencies, and say what they are
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libgles2 libegl1 libglx0 libgl1
+          echo "--- what the built library actually needs ---"
+          ldd built/*/libGDMP.linux.so || true
+          echo "--- anything still unresolved is a load failure waiting to happen ---"
+          ldd built/*/libGDMP.linux.so 2>/dev/null | grep -i "not found" && exit 1 ||             echo "every dependency resolves"
+
       - name: Install Godot ${{ inputs.godot_version }}
         run: |
           V='${{ inputs.godot_version }}'
