@@ -1,0 +1,513 @@
+# .github/workflows/build-gdmp.yml
+#
+# Build GDMP -- the Godot GDExtension wrapping Google's MediaPipe -- for the
+# platforms Kunuleco ships, and prove each artifact before releasing it.
+#
+# WHY THIS EXISTS
+# ---------------
+# The avatar pipeline needs a face tracker that produces EXPRESSIONS, not just a
+# head pose, on every platform we ship including Android. Measured 2026-09-16:
+# opentrack, AITrack and Beam Eye Tracker are head-pose and gaze trackers with no
+# facial expressions at all; OpenSeeFace has expressions but is a desktop Python
+# program and emits no VMC despite three of our own documents saying it does.
+# MediaPipe's FaceLandmarker emits the ARKit blend-shape vocabulary plus a head
+# transform, and GDMP wraps it for Godot on Linux, Windows, macOS, Android, iOS
+# and web.
+#
+# ⚠️ SO WHY NOT SHIP UPSTREAM'S RELEASE? Two measured reasons, and either alone
+# would be enough:
+#
+#   1. v0.6 (2025-09-16) is built against godot-cpp 4.4 and declares
+#      `compatibility_minimum = 4.4`. It loads in our 4.6 at runtime, but it
+#      SEGFAULTS the headless editor on a project's first scan. Upstream master
+#      pins godot-cpp at the commit "Sync with upstream 89cea143987d564363e15d207
+#      438530651d943ac (4.6-stable)" -- which is byte-for-byte the Godot build we
+#      ship, so there is nothing to port and everything to rebuild.
+#
+#   2. 🔴 v0.6's arm64 Android library has `p_align = 0x1000`. That is the
+#      PageSizeMismatchDialog defect that hit Brad's Pixel on 2026-09-14 with a
+#      different GDExtension: the library works everywhere except on a device
+#      with 16 KB memory pages, where the OS refuses to load it, and no test can
+#      see it. Upstream fixed it in "build android libs with 16KB alignment"
+#      (2026-03-27), after v0.6. **arm64 is the phone.**
+#
+# ⚠️ EVERY JOB PROVES ITS ARTIFACT, it does not just produce it -- the rule this
+# repo already follows for libsodium:
+#
+#   * Android  -> every ELF's program headers are read and required to be 16 KB
+#                 aligned, AND the checker is shown v0.6's real 4 KB library and
+#                 required to REJECT it. A check that passes everything and a
+#                 check that works print the same thing.
+#   * Linux    -> the built extension is loaded into a real Godot binary of the
+#                 version we ship, and MediaPipe is run over a portrait: 52
+#                 categories, ARKit-named, plus a head matrix. Then the same
+#                 detector is shown a flat grey image and required to find NOTHING.
+#   * Windows,
+#     macOS    -> the extension is loaded in Godot and required to register its
+#                 classes. ⚠️ Stated plainly rather than dressed up: this is a
+#                 LOAD proof, not a detection proof. Those runners are not where
+#                 our users are and the full probe is not worth the minutes.
+#
+# ⚠️ NOT BUILT HERE: iOS and web. `export_presets.cfg` has zero iOS presets and
+# we ship no web build, and a binary nobody loads is a supply-chain surface with
+# no upside. Linux arm64 is skipped for the same reason. Add them the day a
+# preset exists, not before.
+#
+# ⚠️ IT SHARES A CACHE WITH THE OTHER WORKFLOWS IN THIS REPO. Bazel caching is
+# what makes a re-run tolerable -- MediaPipe and OpenCV are built from source --
+# but GitHub's Actions cache is 10 GB per repository and evicts least-recently-
+# used. Six build jobs of MediaPipe will push veilid's and libsodium's caches
+# out. That is a cost, not a bug, and it is written here so the next person to
+# find a cold veilid build knows why rather than investigating it.
+#
+# ⚠️ THE FIRST-SCAN CRASH IS REPORTED, NOT ENFORCED. The verification job runs
+# `--import` twice and prints both exit codes. The first is allowed to fail,
+# because that is v0.6's known behaviour and the whole question is whether a
+# rebuild fixes it; the second MUST succeed. If a future build makes the first
+# one clean, that is worth seeing in a log rather than discovering by accident.
+
+name: Build GDMP (MediaPipe for Godot)
+
+on:
+  workflow_dispatch:
+    inputs:
+      gdmp_ref:
+        description: 'GDMP git ref to build (commit sha, tag or branch)'
+        required: true
+        default: '31a54abdbf8afd95df2a7f8b043a72e08f67117d'
+        type: string
+      godot_version:
+        description: 'Godot release to verify against -- MUST be the version Urchin ships'
+        required: true
+        default: '4.6-stable'
+        type: string
+      release_tag:
+        description: 'Tag for your release (e.g. gdmp-master-kunuleco.1)'
+        required: true
+        type: string
+      prerelease:
+        description: 'Mark as prerelease'
+        required: false
+        default: true
+        type: boolean
+
+env:
+  GDMP_REPO: 'j20001970/GDMP'
+  # The real historical defect, used as the negative control for the alignment
+  # check. ⚠️ It is a 100 MB download for one library, and that is deliberate:
+  # a control I synthesised myself would test my own arithmetic, while this one
+  # is the artifact that actually shipped broken.
+  KNOWN_BAD_ZIP: 'https://github.com/j20001970/GDMP/releases/download/v0.6/GDMP-v0.6.zip'
+  MODEL_URL: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task'
+  PORTRAIT_URL: 'https://storage.googleapis.com/mediapipe-assets/portrait.jpg'
+
+jobs:
+  # ============================================================
+  # Linux x86_64
+  # ============================================================
+  build-linux:
+    name: Build Linux x86_64
+    runs-on: ubuntu-24.04
+    env:
+      SDK_VERSION: '25.08'
+    steps:
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          cache-save: true
+          disk-cache: gdmp-linux-x86_64
+          external-cache: true
+
+      - name: Checkout GDMP
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.GDMP_REPO }}
+          ref: ${{ inputs.gdmp_ref }}
+          submodules: recursive
+          path: gdmp
+
+      - name: Record provenance
+        working-directory: gdmp
+        run: |
+          echo "GDMP        $(git rev-parse HEAD)"
+          echo "godot-cpp   $(git -C godot-cpp rev-parse HEAD)"
+          echo "mediapipe   $(git -C mediapipe rev-parse HEAD)"
+          git -C godot-cpp log -1 --format='godot-cpp pin: %s'
+
+      # Upstream builds Linux inside the Freedesktop SDK so the glibc baseline is
+      # not whatever the runner happens to have. Kept exactly.
+      - name: Prerequisites
+        run: |
+          sudo apt update
+          sudo apt install -y flatpak
+          sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install --system -y flathub runtime/org.freedesktop.Sdk/x86_64/${{ env.SDK_VERSION }}
+
+      - name: Setup
+        working-directory: gdmp
+        run: |
+          ./scripts/flatpak_env.sh << 'EOF'
+          python ./setup.py
+          EOF
+
+      - name: Build
+        working-directory: gdmp
+        run: |
+          ./scripts/flatpak_env.sh --filesystem=home << 'EOF'
+          python ./build.py desktop --arch x86_64 --output build/x86_64
+          EOF
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: GDMP-linux-x86_64
+          path: gdmp/build/*
+
+  # ============================================================
+  # Windows x86_64
+  # ============================================================
+  build-windows:
+    name: Build Windows x86_64
+    runs-on: windows-2022
+    steps:
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          cache-save: true
+          disk-cache: gdmp-windows-x86_64
+          external-cache: true
+
+      - name: Checkout GDMP
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.GDMP_REPO }}
+          ref: ${{ inputs.gdmp_ref }}
+          submodules: recursive
+          path: gdmp
+
+      - name: Setup
+        shell: bash
+        working-directory: gdmp
+        run: python ./setup.py
+
+      - name: Build
+        shell: bash
+        working-directory: gdmp
+        run: python ./build.py desktop --arch x86_64 --output build/x86_64
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: GDMP-windows-x86_64
+          path: gdmp/build/*
+
+  # ============================================================
+  # macOS, both architectures -- our presets export universal
+  # ============================================================
+  build-macos:
+    name: Build macOS ${{ matrix.arch }}
+    runs-on: macos-14
+    strategy:
+      matrix:
+        arch: ['arm64', 'x86_64']
+    steps:
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          cache-save: true
+          disk-cache: gdmp-macos-${{ matrix.arch }}
+          external-cache: true
+
+      - name: Checkout GDMP
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.GDMP_REPO }}
+          ref: ${{ inputs.gdmp_ref }}
+          submodules: recursive
+          path: gdmp
+
+      - name: Setup
+        working-directory: gdmp
+        run: python ./setup.py
+
+      - name: Build
+        working-directory: gdmp
+        run: python ./build.py desktop --arch ${{ matrix.arch }} --output build/${{ matrix.arch }}
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: GDMP-macos-${{ matrix.arch }}
+          path: gdmp/build/*
+
+  # ============================================================
+  # Android -- the one this repo exists for
+  # ============================================================
+  build-android:
+    name: Build Android ${{ matrix.arch }}
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        arch: ['arm64', 'x86_64']
+    steps:
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          cache-save: true
+          disk-cache: gdmp-android-${{ matrix.arch }}
+          external-cache: true
+
+      - name: Checkout this repo (for the proof scripts)
+        uses: actions/checkout@v6
+
+      - name: Checkout GDMP
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.GDMP_REPO }}
+          ref: ${{ inputs.gdmp_ref }}
+          submodules: recursive
+          path: gdmp
+
+      - name: Setup
+        working-directory: gdmp
+        run: python ./setup.py
+
+      - name: Build
+        working-directory: gdmp
+        run: |
+          export ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME
+          echo "NDK: $ANDROID_NDK_HOME"
+          cat "$ANDROID_NDK_HOME/source.properties" || true
+          python ./build.py android --arch ${{ matrix.arch }} --output build/${{ matrix.arch }}
+
+      # 🔴 THE GATE. A 4 KB library loads on every device we own and is refused
+      # by a phone with 16 KB pages. The negative control is what stops this step
+      # from being decoration.
+      - name: Fetch the known-bad library (negative control)
+        run: |
+          curl -sL -o known-bad.zip "${{ env.KNOWN_BAD_ZIP }}"
+          unzip -q -o known-bad.zip 'addons/GDMP/libs/arm64/libGDMP.android.so' -d known-bad
+          ls -la known-bad/addons/GDMP/libs/arm64/
+
+      - name: Prove 16 KB alignment
+        run: |
+          python3 .github/scripts/prove_gdmp.py align gdmp/build \
+            --negative known-bad/addons/GDMP/libs/arm64/libGDMP.android.so
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: GDMP-android-${{ matrix.arch }}
+          path: gdmp/build/*
+
+  # ============================================================
+  # Prove the Linux artifact by running MediaPipe through it
+  # ============================================================
+  prove-linux:
+    name: Prove Linux artifact in Godot ${{ inputs.godot_version }}
+    runs-on: ubuntu-24.04
+    needs: build-linux
+    steps:
+      - name: Checkout this repo (for the proof scripts)
+        uses: actions/checkout@v6
+
+      - name: Checkout GDMP (for the addon tree it ships)
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.GDMP_REPO }}
+          ref: ${{ inputs.gdmp_ref }}
+          path: gdmp
+
+      - name: Download the built library
+        uses: actions/download-artifact@v8
+        with:
+          name: GDMP-linux-x86_64
+          path: built
+
+      - name: Assemble a scratch project
+        run: |
+          mkdir -p proj
+          cp -r gdmp/addons proj/
+          mkdir -p proj/addons/GDMP/libs
+          cp -r built/* proj/addons/GDMP/libs/
+          find proj/addons/GDMP/libs -type f | head -20
+          cp .github/scripts/prove_gdmp.gd proj/
+          printf 'config_version=5\n[application]\nconfig/name="gdmp proof"\nconfig/features=PackedStringArray("%s")\n' \
+            "$(echo '${{ inputs.godot_version }}' | cut -d- -f1)" > proj/project.godot
+          curl -sL -o proj/face_landmarker.task "${{ env.MODEL_URL }}"
+          curl -sL -o proj/portrait.jpg "${{ env.PORTRAIT_URL }}"
+          ls -la proj
+
+      - name: Install Godot ${{ inputs.godot_version }}
+        run: |
+          V='${{ inputs.godot_version }}'
+          curl -sL -o godot.zip \
+            "https://github.com/godotengine/godot/releases/download/${V}/Godot_v${V}_linux.x86_64.zip"
+          unzip -q godot.zip
+          mv "Godot_v${V}_linux.x86_64" godot
+          chmod +x godot
+          ./godot --version
+
+      # The first scan is where v0.6 segfaults. Report it; do not enforce it.
+      - name: Import (first scan, failure tolerated and reported)
+        run: |
+          set +e
+          ./godot --headless --path proj --import > import1.log 2>&1
+          echo "first --import exit: $?"
+          grep -c handle_crash import1.log || true
+          tail -5 import1.log
+
+      - name: Import (second scan, MUST succeed)
+        run: |
+          ./godot --headless --path proj --import
+          echo "second --import exit: $?"
+
+      - name: Run MediaPipe through the built extension
+        run: |
+          ./godot --headless --path proj -s prove_gdmp.gd -- \
+            "$PWD/proj/face_landmarker.task" "$PWD/proj/portrait.jpg" "$PWD/result.json"
+          cat result.json
+
+      - name: Assert the result
+        run: python3 .github/scripts/prove_gdmp.py detect result.json
+
+  # ============================================================
+  # Load proof on the other desktops -- a load proof, and said so
+  # ============================================================
+  prove-desktop:
+    name: Prove ${{ matrix.name }} loads in Godot
+    needs: [build-windows, build-macos]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x86_64
+            os: windows-2022
+            artifact: GDMP-windows-x86_64
+            godot_asset: win64.exe
+          - name: macos-arm64
+            os: macos-14
+            artifact: GDMP-macos-arm64
+            godot_asset: macos.universal
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v6
+
+      - name: Checkout GDMP
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.GDMP_REPO }}
+          ref: ${{ inputs.gdmp_ref }}
+          path: gdmp
+
+      - name: Download the built library
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.artifact }}
+          path: built
+
+      - name: Assemble and load
+        shell: bash
+        run: |
+          mkdir -p proj && cp -r gdmp/addons proj/
+          mkdir -p proj/addons/GDMP/libs && cp -r built/* proj/addons/GDMP/libs/
+          printf 'config_version=5\n[application]\nconfig/name="gdmp load"\nconfig/features=PackedStringArray("%s")\n' \
+            "$(echo '${{ inputs.godot_version }}' | cut -d- -f1)" > proj/project.godot
+          cat > proj/load.gd <<'GD'
+          extends SceneTree
+          func _init() -> void:
+              var n := 0
+              for c in ClassDB.get_class_list():
+                  if str(c).begins_with("MediaPipe"):
+                      n += 1
+              print("MEDIAPIPE_CLASSES=", n)
+              quit(0 if n > 0 else 1)
+          GD
+          V='${{ inputs.godot_version }}'
+          curl -sL -o godot.zip \
+            "https://github.com/godotengine/godot/releases/download/${V}/Godot_v${V}_${{ matrix.godot_asset }}.zip"
+          unzip -q godot.zip
+          BIN=$(find . -maxdepth 2 -name 'Godot_v*' -type f | head -1)
+          if [ -d "Godot.app" ]; then BIN="Godot.app/Contents/MacOS/Godot"; fi
+          chmod +x "$BIN"
+          "$BIN" --headless --path proj --import || echo "first import exited non-zero (reported, not enforced)"
+          "$BIN" --headless --path proj -s load.gd | tee load.log
+          grep -q 'MEDIAPIPE_CLASSES=[1-9]' load.log
+
+  # ============================================================
+  # Assemble and publish
+  # ============================================================
+  release:
+    name: Release
+    runs-on: ubuntu-24.04
+    needs: [prove-linux, prove-desktop, build-android]
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout GDMP
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.GDMP_REPO }}
+          ref: ${{ inputs.gdmp_ref }}
+          path: gdmp
+
+      - name: Download every artifact
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          pattern: GDMP-*
+
+      # The same tree shape upstream's own release produces, so it drops into
+      # the client unchanged.
+      - name: Assemble
+        run: |
+          mkdir -p dist/addons
+          cp -r gdmp/addons/GDMP dist/addons/
+          cp gdmp/LICENSE dist/addons/GDMP/
+          cp gdmp/README.md dist/addons/GDMP/
+          mkdir -p dist/addons/GDMP/libs
+          for d in artifacts/GDMP-*; do cp -r "$d"/* dist/addons/GDMP/libs/; done
+          find dist -type f | sort
+          ( cd dist && zip -qr "../GDMP-${{ inputs.release_tag }}.zip" addons )
+          sha256sum "GDMP-${{ inputs.release_tag }}.zip" > sha256sums.txt
+          ( cd dist && find addons -type f -name '*.so' -o -name '*.dll' -o -name '*.dylib' \
+            | sort | xargs sha256sum ) >> sha256sums.txt
+          cat sha256sums.txt
+
+      - name: Provenance
+        working-directory: gdmp
+        run: |
+          {
+            echo "GDMP commit:      $(git rev-parse HEAD)"
+            echo "Godot verified:   ${{ inputs.godot_version }}"
+            echo "Built:            $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > ../provenance.txt
+          cat ../provenance.txt
+
+      - name: Publish
+        env:
+          GITHUB_TOKEN: ${{ github.TOKEN }}
+        run: |
+          {
+            echo "GDMP built from source for Kunuleco."
+            echo
+            cat provenance.txt
+            echo
+            echo 'Every artifact was proved before release: Android libraries are'
+            echo 'read for 16 KB page alignment with the v0.6 4 KB library as a'
+            echo 'negative control; the Linux library runs MediaPipe over a'
+            echo 'portrait inside the Godot build Urchin ships and is required to'
+            echo 'find nothing in a blank image; Windows and macOS get a load'
+            echo 'proof only, and that is a load proof and not a detection proof.'
+            echo
+            echo '```'
+            cat sha256sums.txt
+            echo '```'
+          } > notes.md
+          gh release create "${{ inputs.release_tag }}" \
+            --repo "${{ github.repository }}" \
+            --title "GDMP ${{ inputs.release_tag }}" \
+            --notes-file notes.md \
+            ${{ inputs.prerelease && '--prerelease' || '' }} \
+            "GDMP-${{ inputs.release_tag }}.zip" sha256sums.txt

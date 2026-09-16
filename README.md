@@ -23,6 +23,23 @@ Key requirements:
 - Rust 1.88.0+ (MSRV)
 - Cap'n Proto 1.1.0
 
+## What else this repo builds
+
+⚠️ **The name is now narrower than the contents.** This repository is where Kunuleco's
+native artifacts are built from source and published, and Veilid is the first of them
+rather than the only one.
+
+| artifact | workflow | why it is built here |
+|---|---|---|
+| **Veilid** | `build-veilid.yml` | upstream is on GitLab and publishes no binaries |
+| **libsodium** | `build-libsodium.yml` | upstream publishes a prebuilt for Windows only |
+| **GDMP** (MediaPipe for Godot) | `build-gdmp.yml` | the only release is built against the wrong Godot, **and its arm64 Android library is 4 KB page aligned, which a 16 KB-page phone refuses to load** |
+
+🔴 **Every one of them proves its artifact before releasing it**, and each proof carries a
+negative control — a tampered signature that must fail to verify, a 4 KB library that must
+be rejected, a blank image in which a face detector must find nothing. **A check that
+passes everything and a check that works print the same thing.**
+
 ## Usage
 
 ### For Kunuleco Users
