@@ -1,0 +1,284 @@
+name: Build CameraServerExtension
+
+# Godot has no camera on Windows. Not a missing driver, not a permission, not a
+# stale template: `modules/camera/camera_win.cpp` is a skeleton whose author
+# gutted his own DirectShow implementation and left a comment saying so, and it
+# is byte-for-byte the same file on `master` today. `CameraWindows` is installed
+# as the default camera server regardless, `add_active_cameras()` is a comment,
+# and `CameraFeedWindows::activate_feed()` RETURNS TRUE while delivering
+# nothing. A silent no-op in the engine, on the one platform the person with a
+# webcam actually runs.
+#
+# CameraServerExtension fills exactly that hole, over Media Foundation, and it
+# is MIT. It also has an upstream PR to put the backend into Godot itself
+# (godotengine/godot#108538), so the long-term shape of this file is deletion.
+#
+# ⚠️ WHY NOT GDMP'S OWN `MediaPipeCameraHelper`, which was the plan for an hour:
+# it is not in any library we ship, and that is deliberate upstream rather than
+# an oversight. `gdlibrary.cc` never registers it, `//GDMP:GDMP` does not depend
+# on `//GDMP/io:camera_helper`, and the base implementation's constructor prints
+# "MediaPipeCameraHelper has been deprecated and will be removed in the future.
+# Please consider CameraServer-based methods for accessing camera frames."
+# Reviving it would also have meant reversing GDMP's own OpenCV diet: their
+# patch cuts `OPENCV_MODULES` down to `imgproc` and `core`, and `videoio`, where
+# `cv::VideoCapture` lives, is one of the six they removed. This route writes no
+# C++ of ours, revives nothing deprecated, and needs no OpenCV at all.
+#
+# 🔴 AND THE PROPERTY THAT MAKES IT DROP IN: the extension registers its feeds
+# into Godot's OWN `CameraServer`. Nothing in the client has to learn a second
+# capture API — `CameraFrameSource` enumerates `CameraServer.get_feed_count()`
+# on Windows exactly as it does on Linux.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: 'Source repository'
+        required: false
+        default: 'j20001970/godot-cameraserver-extension'
+        type: string
+      ref:
+        description: 'Ref to build (branch, tag or SHA)'
+        required: false
+        default: 'master'
+        type: string
+      godot_version:
+        description: 'Godot version to prove the load against'
+        required: false
+        default: '4.6-stable'
+        type: string
+      release_tag:
+        description: 'Tag for the release'
+        required: true
+        type: string
+      prerelease:
+        description: 'Mark as prerelease'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  # ============================================================
+  # Windows x86_64 -- the one we are here for
+  # ============================================================
+  build-windows:
+    name: Build Windows x86_64
+    runs-on: windows-2022
+    steps:
+      - name: Checkout the extension
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ inputs.repo }}
+          ref: ${{ inputs.ref }}
+          submodules: recursive
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: 3.x
+
+      - name: Install SCons
+        run: python -m pip install scons
+
+      # ⚠️ `target=template_release` where upstream's own workflow takes the
+      # SCons default, which is `template_debug`. Their `.gdextension` names ONE
+      # library per arch with no debug/release split, so whichever is built is
+      # the one that ships, and a product ships the release one. Said here
+      # because it is the single place this build differs from theirs.
+      - name: Build
+        run: scons api_version=4.4 arch=x86_64 target=template_release
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: CSE-windows-x86_64
+          path: addons/CameraServerExtension/x86_64/libcameraserver-extension.windows.dll
+
+  # ============================================================
+  # Linux x86_64 -- NOT because the engine needs it. It is the only platform
+  # where the result can be loaded and looked at on the machine that builds the
+  # client, so it is what turns "it compiled" into "it registers".
+  # ============================================================
+  build-linux:
+    name: Build Linux x86_64
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout the extension
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ inputs.repo }}
+          ref: ${{ inputs.ref }}
+          submodules: recursive
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: 3.x
+
+      # The Linux backend is PipeWire, and its SConstruct calls pkg-config for
+      # all three at configure time, so a missing header fails as a scons error
+      # rather than as a link error.
+      - name: Install SCons and the PipeWire headers
+        run: |
+          python -m pip install scons
+          sudo apt-get update -qq
+          sudo apt-get install -y libpipewire-0.3-dev libglib2.0-dev
+
+      - name: Build
+        run: scons api_version=4.4 arch=x86_64 target=template_release
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: CSE-linux-x86_64
+          path: addons/CameraServerExtension/x86_64/libcameraserver-extension.linux.so
+
+  # ============================================================
+  # Does it LOAD, and does the class arrive? A build that produced a file is
+  # not a build that produced an extension.
+  # ============================================================
+  prove:
+    name: Prove ${{ matrix.name }} loads in Godot
+    needs: [build-windows, build-linux]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x86_64
+            os: windows-2022
+            artifact: CSE-windows-x86_64
+            godot_asset: win64.exe
+          - name: linux-x86_64
+            os: ubuntu-24.04
+            artifact: CSE-linux-x86_64
+            godot_asset: linux.x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout the extension
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ inputs.repo }}
+          ref: ${{ inputs.ref }}
+          path: cse
+
+      - name: Download the built library
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.artifact }}
+          path: built
+
+      - name: Assemble and load
+        shell: bash
+        run: |
+          mkdir -p proj && cp -r cse/addons proj/
+          mkdir -p proj/addons/CameraServerExtension/x86_64
+          cp built/* proj/addons/CameraServerExtension/x86_64/
+          printf 'config_version=5\n[application]\nconfig/name="cse load"\nconfig/features=PackedStringArray("%s")\n' \
+            "$(echo '${{ inputs.godot_version }}' | cut -d- -f1)" > proj/project.godot
+          cat > proj/load.gd <<'GD'
+          extends SceneTree
+          func _init() -> void:
+              # ⚠️ Two separate claims, and they are printed separately: that the
+              # library loaded at all, and that the class it exists for arrived.
+              var has_server := ClassDB.class_exists("CameraServerExtension")
+              var has_feed := ClassDB.class_exists("CameraFeedExtension")
+              print("CSE_SERVER_CLASS=", has_server)
+              print("CSE_FEED_CLASS=", has_feed)
+              if has_server:
+                  # Instantiating is what the README says populates CameraServer,
+                  # so a build that registers the class and cannot make one is a
+                  # failure this proof would otherwise miss.
+                  var ext = ClassDB.instantiate("CameraServerExtension")
+                  print("CSE_INSTANTIATED=", ext != null)
+                  if ext != null and ext.has_method("permission_granted"):
+                      print("CSE_PERMISSION=", ext.call("permission_granted"))
+              quit(0 if (has_server and has_feed) else 1)
+          GD
+          V='${{ inputs.godot_version }}'
+          curl -sL -o godot.zip \
+            "https://github.com/godotengine/godot/releases/download/${V}/Godot_v${V}_${{ matrix.godot_asset }}.zip"
+          unzip -q godot.zip
+          BIN=$(find . -maxdepth 2 -name 'Godot_v*' -type f | head -1)
+          chmod +x "$BIN"
+          "$BIN" --headless --path proj --import || echo "first import exited non-zero (reported, not enforced)"
+          "$BIN" --headless --path proj -s load.gd | tee load.log
+          grep -q 'CSE_SERVER_CLASS=true' load.log
+          grep -q 'CSE_FEED_CLASS=true' load.log
+
+  # ============================================================
+  # Publish, with a hash per file. The client verifies against these before a
+  # library is copied in -- the rule GDMP's own release set.
+  # ============================================================
+  release:
+    name: Release
+    runs-on: ubuntu-24.04
+    needs: [prove]
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout the extension
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ inputs.repo }}
+          ref: ${{ inputs.ref }}
+          path: cse
+
+      - name: Download every artifact
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          pattern: CSE-*
+
+      - name: Assemble
+        run: |
+          mkdir -p dist/addons
+          cp -r cse/addons/CameraServerExtension dist/addons/
+          mkdir -p dist/addons/CameraServerExtension/x86_64
+          cp artifacts/CSE-windows-x86_64/* dist/addons/CameraServerExtension/x86_64/
+          cp artifacts/CSE-linux-x86_64/* dist/addons/CameraServerExtension/x86_64/
+          cp cse/LICENSE dist/addons/CameraServerExtension/ 2>/dev/null || true
+          find dist -type f | sort
+
+      - name: Hash every file, then the zip
+        run: |
+          cd dist
+          find addons -type f -exec sha256sum {} \; | sort -k2 > ../sha256sums.txt
+          zip -qr ../CameraServerExtension-${{ inputs.release_tag }}.zip addons
+          cd ..
+          sha256sum CameraServerExtension-${{ inputs.release_tag }}.zip >> sha256sums.txt
+          cat sha256sums.txt
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<NOTES
+          CameraServerExtension built from source for Kunuleco.
+
+          Source:           ${{ inputs.repo }} @ ${{ inputs.ref }}
+          Godot proved on:  ${{ inputs.godot_version }}
+          Built:            $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          Why this exists: Godot has no camera backend on Windows. Its
+          \`modules/camera/camera_win.cpp\` lists no cameras and its feed's
+          \`activate_feed()\` returns true while delivering nothing, unchanged on
+          master. This extension supplies one over Media Foundation and registers
+          its feeds into Godot's own CameraServer, so nothing downstream needs a
+          second capture API.
+
+          Every library below was loaded in Godot ${{ inputs.godot_version }} on its
+          own platform and both \`CameraServerExtension\` and \`CameraFeedExtension\`
+          were required to arrive in ClassDB. That is a LOAD proof and a class-
+          registration proof. It is not a capture proof: no runner has a camera.
+
+          \`\`\`
+          $(cat sha256sums.txt)
+          \`\`\`
+          NOTES
+          gh release create '${{ inputs.release_tag }}' \
+            --repo '${{ github.repository }}' \
+            --title 'CameraServerExtension ${{ inputs.release_tag }}' \
+            --notes-file notes.md \
+            ${{ inputs.prerelease && '--prerelease' || '' }} \
+            "CameraServerExtension-${{ inputs.release_tag }}.zip" \
+            sha256sums.txt
