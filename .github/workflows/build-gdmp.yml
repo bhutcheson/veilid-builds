@@ -60,11 +60,23 @@
 # out. That is a cost, not a bug, and it is written here so the next person to
 # find a cold veilid build knows why rather than investigating it.
 #
-# ⚠️ THE FIRST-SCAN CRASH IS REPORTED, NOT ENFORCED. The verification job runs
-# `--import` twice and prints both exit codes. The first is allowed to fail,
-# because that is v0.6's known behaviour and the whole question is whether a
-# rebuild fixes it; the second MUST succeed. If a future build makes the first
-# one clean, that is worth seeing in a log rather than discovering by accident.
+# ⚠️ THE FIRST-SCAN CRASH IS REPORTED, NOT ENFORCED, AND THE FIRST RUN ANSWERED
+# THE QUESTION IT WAS ASKED. The job runs `--import` twice and prints both exit
+# codes; the first may fail, the second must not.
+#
+#     first --import exit: 134        <- still SIGSEGV, on the master build
+#     second --import exit: 0
+#
+# 🔴 So a rebuild against the matching godot-cpp does NOT fix it: the segfault on
+# a fresh project's first scan is not the 4.4-vs-4.6 mismatch it looked like. It
+# happens after the import has written its artifacts, a second import is clean,
+# and runtime loading is fine -- so it stays reported rather than enforced, and
+# the cause is now a known-unknown rather than an assumption.
+#
+# ⚠️ AND ONE MEASURED DIFFERENCE FROM v0.6: master registers 51 MediaPipe
+# classes where v0.6 registered 53, which matches their release note about
+# deprecating some. Not a fault; recorded so a future count change is read
+# against a number somebody wrote down.
 
 name: Build GDMP (MediaPipe for Godot)
 
