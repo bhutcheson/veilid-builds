@@ -35,7 +35,7 @@ on:
       repo:
         description: 'Source repository'
         required: false
-        default: 'j20001970/godot-cameraserver-extension'
+        default: 'bhutcheson/godot-cameraserver-extension'
         type: string
       ref:
         description: 'Ref to build (branch, tag or SHA)'
@@ -95,9 +95,24 @@ jobs:
           path: addons/CameraServerExtension/x86_64/libcameraserver-extension.windows.dll
 
   # ============================================================
-  # Linux x86_64 -- NOT because the engine needs it. It is the only platform
-  # where the result can be loaded and looked at on the machine that builds the
-  # client, so it is what turns "it compiled" into "it registers".
+  # Linux x86_64, STUB BACKEND, and the reason is measured rather than tidy.
+  #
+  # A .gdextension that names no library for the platform you are running on
+  # makes Godot print SIX error lines on every run -- measured on 4.6, on this
+  # project's own tree. So a Linux library has to be there.
+  #
+  # 🔴 AND IT CANNOT BE THE REAL ONE. The native Linux backend links PipeWire
+  # and xdg-desktop-portal, and the first run of this workflow proved what that
+  # costs: the library BUILT and then failed to LOAD with
+  # "libpipewire-0.3.so.0: cannot open shared object file" on a clean
+  # ubuntu-24.04 runner. That is a failure where the noise was only a note.
+  # ⚠️ The load proof is what caught it, which is the reason the load proof is
+  # a job and not a line in the build.
+  #
+  # `backend=dummy` is one line in our fork's SConstruct. Both classes still
+  # register and nothing enumerates, which is all a platform wants from a
+  # library it never constructs -- Linux has a real V4L2 backend in the engine
+  # and `CameraFrameSource.EXTENSION_PLATFORMS` never reaches for this one.
   # ============================================================
   build-linux:
     name: Build Linux x86_64
@@ -115,17 +130,14 @@ jobs:
         with:
           python-version: 3.x
 
-      # The Linux backend is PipeWire, and its SConstruct calls pkg-config for
-      # all three at configure time, so a missing header fails as a scons error
-      # rather than as a link error.
-      - name: Install SCons and the PipeWire headers
-        run: |
-          python -m pip install scons
-          sudo apt-get update -qq
-          sudo apt-get install -y libpipewire-0.3-dev libglib2.0-dev
+      # ⚠️ No PipeWire headers, deliberately. If this job ever needs them again
+      # it has silently gone back to the native backend, and the load proof
+      # below would be the thing that noticed.
+      - name: Install SCons
+        run: python -m pip install scons
 
       - name: Build
-        run: scons api_version=4.4 arch=x86_64 target=template_release
+        run: scons api_version=4.4 arch=x86_64 target=template_release backend=dummy
 
       - name: Upload
         uses: actions/upload-artifact@v7
