@@ -1,0 +1,4 @@
+# Replaces the sdist's pyproject.toml, whose build-system requires conan. Metadata comes from setup.py.
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"

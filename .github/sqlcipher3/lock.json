@@ -1,0 +1,54 @@
+{
+  "_comment": "Every input of build-sqlcipher3.yml, pinned by content hash. The workflow reads its versions from here and fails on any mismatch; nothing is fetched by name alone. RULINGS 248 (Brad 2026-11-11 21:24).",
+  "wheel_version": "0.5.7+kunuleco.1",
+  "python": "3.14",
+  "binding": {
+    "name": "sqlcipher3-wheels",
+    "version": "0.5.7",
+    "sdist_url": "https://files.pythonhosted.org/packages/61/ec/d79c2e5f5b9246471f217cdd5f703dc8d804bce557a047e1bfad4f33c376/sqlcipher3_wheels-0.5.7.tar.gz",
+    "sdist_sha256": "5fd344abba62c487c4d857a6fb55cb8dff8a97d4c4fbb4f9394b473e8e315dee",
+    "_note": "Only the binding's C sources (src/*.c, src/*.h) and its sqlcipher3/ package are used. Its setup.py (which runs conan install with -b missing) and its bundled SQLite 3.51.1 / SQLCipher 4.12.0 amalgamation are replaced."
+  },
+  "sqlcipher": {
+    "version": "4.20.0",
+    "sqlite_version": "3.54.1",
+    "repo": "https://github.com/sqlcipher/sqlcipher.git",
+    "tag": "v4.20.0",
+    "commit": "355d4db92d3404e71faa8088d071a71d767807f4",
+    "_note": "Zetetic's tags and commits are not signed (GitHub API: verification.reason=unsigned), so the commit sha is the pin. The amalgamation is generated with the tree's own configure (autosetup, its bundled jimsh; no tclsh) and is byte-identical across runs (measured twice on Linux, 2026-11-11), so its hashes are pinned too.",
+    "amalgamation_sha256": {
+      "sqlite3.c": "8cd2347d18886fee4651153fabeeeffb7cec008700987dab1c00261febc4220f",
+      "sqlite3.h": "e36eb6ed4de77e56a633866a8f84ed339785662d0cf79cf099f420b638bf28ec"
+    }
+  },
+  "build_tools": {
+    "setuptools": {"version": "84.2.1", "sha256": "ca140b45d5325a9478f880e351484f62fef15f336462e449ca0c03c873d589c2"},
+    "manylinux_image": "quay.io/pypa/manylinux_2_28_x86_64@sha256:9555ba6c479fa69a2aa80ad1dc57154a60d562b19df159361d9379a02beb1e36",
+    "nasm": {
+      "version": "3.02",
+      "url": "https://www.nasm.us/pub/nasm/releasebuilds/3.02/win64/nasm-3.02-win64.zip",
+      "sha256": "161d0bfaff53c2f9e9f3e69fd0672323ebabafd1268976a5cec11be92a19aee7",
+      "_note": "Windows only: OpenSSL's AES-NI and SHA code is perlasm that NASM assembles, and no-asm would leave table AES (a cache-timing side channel). nasm.us publishes no signature or checksum for this zip and no second origin carries it, so this hash is TRUST ON FIRST USE (downloaded 2026-11-11)."
+    }
+  },
+  "openssl": {
+    "version": "3.6.5",
+    "url": "https://github.com/openssl/openssl/releases/download/openssl-3.6.5/openssl-3.6.5.tar.gz",
+    "sha256": "a2157c2830efdec3788939b00c9b0638306d3f0bbb76dc4832ee503bb397df98",
+    "signing_key_fingerprint": "B146647E45A7B33947AB226B2A2C87D161692D40",
+    "_note": "The fingerprint is the one openssl-library.org/source/ names for current releases, and keys.openpgp.org serves the same certificate (checked 2026-11-11). Its signing subkey C46ED3F2CBEFDA1FDAADA44264ED7B1DCCE71CB2 expires 2027-05-26. The tarball's signature is verified against this fingerprint before anything is built, with no fallback.",
+    "configure_options": [
+      "no-shared",
+      "no-module",
+      "no-dso",
+      "no-autoload-config",
+      "no-engine",
+      "no-legacy",
+      "no-apps",
+      "no-docs",
+      "no-tests"
+    ],
+    "openssldir": "/nonexistent/kunuleco-openssl",
+    "_why_options": "Static, so the wheel carries exactly this OpenSSL. no-dso and no-module: the library cannot load code from a file at run time. no-autoload-config: it never reads an openssl.cnf, so a config planted in OPENSSLDIR (the CVE-2019-1552 class on Windows) cannot load a provider into the node. no-legacy: SQLCipher uses AES-256-CBC, HMAC-SHA1/256/512, PBKDF2 and the RNG only."
+  }
+}

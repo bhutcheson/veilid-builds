@@ -1,0 +1,389 @@
+# .github/workflows/build-sqlcipher3.yml
+#
+# Build the sqlcipher3 wheel the Kunuleco node uses for encryption at rest (REST-01 / A-E2, RULINGS 248).
+#
+# WHY THIS EXISTS
+# ---------------
+# The PyPI wheels (sqlcipher3-wheels 0.5.7, 2026-01-07) carry SQLCipher 4.12.0 over SQLite 3.51.1, and an OpenSSL 3.6.0 that
+# ConanCenter's build farm compiled (the sdist's setup.py runs `conan install -b missing`). Brad ruled 2026-11-11 21:24 that the
+# project builds its own: SQLCipher at the current release, OpenSSL from source at the current 3.6 patch, every input pinned in
+# .github/sqlcipher3/lock.json. A SQLCipher, OpenSSL or binding fix then waits on nobody: bump the lock and run this.
+#
+# ⚠️ SUPPLY CHAIN, as in build-libsodium.yml: nothing is fetched by name alone, and there is NO fallback path.
+#   - OpenSSL: the tarball's sha256 is the lock's, AND its signature verifies against the certificate committed here
+#     (.github/sqlcipher3/openssl-signing-key.asc) with the primary-key fingerprint the lock names.
+#   - SQLCipher: Zetetic does not sign tags, so the checked-out commit must be the lock's sha, and the amalgamation generated
+#     from it must have the lock's sha256 (it is byte-identical across runs).
+#   - The binding's sdist, setuptools and the manylinux image are pinned by hash. NASM (Windows) is pinned by a
+#     trust-on-first-use hash: nasm.us publishes no signature (lock.json says so).
+#   The `sources` job verifies once; every build job re-checks each file's sha256 after the artifact hop.
+#
+# ⚠️ EVERY JOB PROVES THE ARTIFACT (.github/scripts/prove_sqlcipher.py): it installs the wheel it just built into a fresh venv
+# and checks the versions (the provider's RUNTIME version included), that no shared OpenSSL is named, that the file is
+# encrypted, that the stdlib and a wrong key are refused, and, as the negative control, that a flipped bit in a page is
+# refused by the page HMAC. That is the Windows and macOS import gate of RULINGS 248: it runs on every build.
+#
+# OpenSSL is configured static, with no-dso / no-module (it cannot load code from a file), no-autoload-config (it never reads an
+# openssl.cnf, so a config planted in OPENSSLDIR cannot load a provider: the CVE-2019-1552 class on Windows) and no-legacy.
+
+name: Build sqlcipher3 Wheels
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Tag for the release (e.g. sqlcipher3-0.5.7-kunuleco.1); the wheel version comes from lock.json'
+        required: true
+        type: string
+      prerelease:
+        description: 'Mark as prerelease'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  # ============================================================
+  # Fetch and VERIFY every source once
+  # ============================================================
+  sources:
+    name: Fetch and verify sources
+    runs-on: ubuntu-22.04
+    outputs:
+      manylinux_image: ${{ steps.lock.outputs.manylinux_image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: lock
+        run: echo "manylinux_image=$(python3 .github/scripts/lock.py build_tools.manylinux_image)" >> "$GITHUB_OUTPUT"
+
+      - name: OpenSSL -- sha256 AND signature, no fallback
+        run: |
+          set -euo pipefail
+          L() { python3 .github/scripts/lock.py "$1"; }
+          mkdir -p sources && cd sources
+          curl -fsSLO "$(L openssl.url)"
+          curl -fsSLO "$(L openssl.url).asc"
+          T="openssl-$(L openssl.version).tar.gz"
+          echo "$(L openssl.sha256)  $T" | sha256sum -c -
+          export GNUPGHOME="$(mktemp -d)"
+          gpg --batch --import ../.github/sqlcipher3/openssl-signing-key.asc
+          # VALIDSIG's LAST field is the PRIMARY key's fingerprint: the signature must be good AND made under that certificate.
+          gpg --batch --status-fd 1 --verify "$T.asc" "$T" > status.txt
+          cat status.txt
+          PRIMARY="$(awk '$2 == "VALIDSIG" {print $NF}' status.txt)"
+          test "$PRIMARY" = "$(L openssl.signing_key_fingerprint)" || { echo "signed by $PRIMARY, not the pinned key"; exit 1; }
+          rm status.txt "$T.asc"
+
+      - name: The binding's sdist -- sha256
+        run: |
+          set -euo pipefail
+          L() { python3 .github/scripts/lock.py "$1"; }
+          cd sources
+          curl -fsSLO "$(L binding.sdist_url)"
+          echo "$(L binding.sdist_sha256)  $(basename "$(L binding.sdist_url)")" | sha256sum -c -
+
+      - name: SQLCipher -- the pinned commit, then the amalgamation's sha256
+        run: |
+          set -euo pipefail
+          L() { python3 .github/scripts/lock.py "$1"; }
+          git clone --quiet --depth 1 --branch "$(L sqlcipher.tag)" "$(L sqlcipher.repo)" sqlcipher
+          test "$(git -C sqlcipher rev-parse HEAD)" = "$(L sqlcipher.commit)" || { echo "the tag moved"; exit 1; }
+          mkdir amalg && cd amalg
+          ../sqlcipher/configure --with-tempstore=yes > configure.log 2>&1 || { cat configure.log; exit 1; }
+          make sqlite3.c > make.log 2>&1 || { tail -50 make.log; exit 1; }
+          python3 - <<'EOF'
+          import hashlib, json, sys
+          want = json.load(open("../.github/sqlcipher3/lock.json"))["sqlcipher"]["amalgamation_sha256"]
+          for name, h in want.items():
+              got = hashlib.sha256(open(name, "rb").read()).hexdigest()
+              print(name, got)
+              if got != h:
+                  sys.exit(f"{name}: {got}, the lock says {h}")
+          EOF
+          cp sqlite3.c sqlite3.h ../sources/
+          cp ../sqlcipher/LICENSE.md ../sources/SQLCIPHER_LICENSE.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sqlcipher3-sources
+          path: sources
+
+  # ============================================================
+  # Linux x64 -- manylinux_2_28, the image pinned by digest
+  # ============================================================
+  build-linux-x64:
+    name: Build Linux x64
+    needs: sources
+    runs-on: ubuntu-latest
+    container: ${{ needs.sources.outputs.manylinux_image }}
+    env:
+      PY: /opt/python/cp314-cp314/bin/python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sqlcipher3-sources
+          path: sources
+
+      - name: Build OpenSSL (static, from the verified tarball)
+        run: |
+          set -euo pipefail
+          L() { $PY .github/scripts/lock.py "$1"; }
+          # OpenSSL's Configure needs perl's IPC::Cmd and Time::Piece, which AlmaLinux 8 ships separately.
+          dnf install -y -q perl-IPC-Cmd perl-Time-Piece
+          T="sources/openssl-$(L openssl.version).tar.gz"
+          echo "$(L openssl.sha256)  $T" | sha256sum -c -
+          tar xzf "$T"
+          cd "openssl-$(L openssl.version)"
+          ./Configure linux-x86_64 $(L openssl.configure_options) -fPIC \
+            --prefix="$GITHUB_WORKSPACE/ossl" --openssldir="$(L openssl.openssldir)" --libdir=lib
+          make -j"$(nproc)" > ../ossl-make.log 2>&1 || { tail -80 ../ossl-make.log; exit 1; }
+          make install_sw > /dev/null
+          cp LICENSE.txt ../sources/OPENSSL_LICENSE.txt
+
+      - name: Build the wheel
+        run: |
+          set -euo pipefail
+          L() { $PY .github/scripts/lock.py "$1"; }
+          printf 'setuptools==%s --hash=sha256:%s\n' "$(L build_tools.setuptools.version)" "$(L build_tools.setuptools.sha256)" > req.txt
+          $PY -m pip install -q --require-hashes --no-deps -r req.txt
+          $PY .github/scripts/assemble_sqlcipher3.py .github/sqlcipher3/lock.json sources tree
+          cp sources/SQLCIPHER_LICENSE.md sources/OPENSSL_LICENSE.txt tree/
+          cd tree
+          OPENSSL_PREFIX="$GITHUB_WORKSPACE/ossl" WHEEL_VERSION="$(L wheel_version)" \
+            $PY -m pip wheel --no-build-isolation --no-deps -w ../raw .
+          cd ..
+          auditwheel show raw/*.whl
+          auditwheel repair --plat manylinux_2_28_x86_64 -w dist raw/*.whl
+          ls -la dist
+
+      - name: PROVE it (a fresh venv, this wheel only)
+        run: |
+          set -euo pipefail
+          $PY -m venv /tmp/probe
+          /tmp/probe/bin/pip install -q --no-deps --no-index dist/*.whl
+          /tmp/probe/bin/python -I .github/scripts/prove_sqlcipher.py "$PWD/.github/sqlcipher3/lock.json"
+          SO="$(find /tmp/probe -name '_sqlite3*.so')"
+          readelf -d "$SO" | grep NEEDED
+          ! readelf -d "$SO" | grep -E 'NEEDED.*lib(crypto|ssl)'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-linux-x64
+          path: dist/*.whl
+
+  # ============================================================
+  # macOS x64 / ARM64
+  # ============================================================
+  build-macos:
+    name: Build ${{ matrix.label }}
+    needs: sources
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ⚠️ macos-13 is RETIRED (build-libsodium.yml): a job targeting it queues for 24 h and auto-cancels.
+          - os: macos-15-intel
+            label: macOS x64
+            slug: macos-x64
+            arch: x86_64
+            target: darwin64-x86_64-cc
+            deployment: '10.15'
+          - os: macos-14
+            label: macOS ARM64
+            slug: macos-arm64
+            arch: arm64
+            target: darwin64-arm64-cc
+            deployment: '11.0'
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment }}
+      # setup-python's interpreter is universal2: without these, setuptools compiles for both arches (and the static
+      # libcrypto has one) and tags the wheel universal2.
+      ARCHFLAGS: -arch ${{ matrix.arch }}
+      _PYTHON_HOST_PLATFORM: macosx-${{ matrix.deployment }}-${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - uses: actions/download-artifact@v4
+        with:
+          name: sqlcipher3-sources
+          path: sources
+
+      - name: Build OpenSSL (static, from the verified tarball)
+        run: |
+          set -euo pipefail
+          L() { python .github/scripts/lock.py "$1"; }
+          T="sources/openssl-$(L openssl.version).tar.gz"
+          echo "$(L openssl.sha256)  $T" | shasum -a 256 -c -
+          tar xzf "$T"
+          cd "openssl-$(L openssl.version)"
+          ./Configure ${{ matrix.target }} $(L openssl.configure_options) \
+            --prefix="$GITHUB_WORKSPACE/ossl" --openssldir="$(L openssl.openssldir)" --libdir=lib
+          make -j"$(sysctl -n hw.ncpu)" > ../ossl-make.log 2>&1 || { tail -80 ../ossl-make.log; exit 1; }
+          make install_sw > /dev/null
+          cp LICENSE.txt ../sources/OPENSSL_LICENSE.txt
+          lipo -info "$GITHUB_WORKSPACE/ossl/lib/libcrypto.a"
+
+      - name: Build the wheel
+        run: |
+          set -euo pipefail
+          L() { python .github/scripts/lock.py "$1"; }
+          printf 'setuptools==%s --hash=sha256:%s\n' "$(L build_tools.setuptools.version)" "$(L build_tools.setuptools.sha256)" > req.txt
+          python -m pip install -q --require-hashes --no-deps -r req.txt
+          python .github/scripts/assemble_sqlcipher3.py .github/sqlcipher3/lock.json sources tree
+          cp sources/SQLCIPHER_LICENSE.md sources/OPENSSL_LICENSE.txt tree/
+          cd tree
+          OPENSSL_PREFIX="$GITHUB_WORKSPACE/ossl" WHEEL_VERSION="$(L wheel_version)" \
+            python -m pip wheel --no-build-isolation --no-deps -w ../dist .
+          ls -la ../dist
+
+      - name: PROVE it (a fresh venv, this wheel only)
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/probe
+          /tmp/probe/bin/pip install -q --no-deps --no-index dist/*.whl
+          /tmp/probe/bin/python -I .github/scripts/prove_sqlcipher.py "$PWD/.github/sqlcipher3/lock.json"
+          SO="$(find /tmp/probe -name '_sqlite3*.so')"
+          otool -L "$SO"
+          ! otool -L "$SO" | grep -E 'lib(crypto|ssl)'
+          lipo -info "$SO"
+          case "$(lipo -archs "$SO")" in ${{ matrix.arch }}) ;; *) echo "wrong arch"; exit 1;; esac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.slug }}
+          path: dist/*.whl
+
+  # ============================================================
+  # Windows x64 -- MSVC, Strawberry Perl, NASM pinned by hash
+  # ============================================================
+  build-windows-x64:
+    name: Build Windows x64
+    needs: sources
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          architecture: x64
+      - uses: actions/download-artifact@v4
+        with:
+          name: sqlcipher3-sources
+          path: sources
+
+      - name: NASM (sha256-pinned) and the OpenSSL source
+        shell: bash
+        run: |
+          set -euo pipefail
+          L() { python .github/scripts/lock.py "$1"; }
+          curl -fsSLo nasm.zip "$(L build_tools.nasm.url)"
+          echo "$(L build_tools.nasm.sha256)  nasm.zip" | sha256sum -c -
+          unzip -q nasm.zip -d nasm
+          echo "$PWD/nasm/nasm-$(L build_tools.nasm.version)" >> "$GITHUB_PATH"
+          T="sources/openssl-$(L openssl.version).tar.gz"
+          echo "$(L openssl.sha256)  $T" | sha256sum -c -
+          tar xzf "$T"
+          mv "openssl-$(L openssl.version)" openssl-src
+          cp openssl-src/LICENSE.txt sources/OPENSSL_LICENSE.txt
+          echo "OSSL_OPTS=$(L openssl.configure_options)" >> "$GITHUB_ENV"
+
+      - name: Build OpenSSL (static; /MT /Zl, so it links into Python's /MD extension)
+        shell: cmd
+        run: |
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set VS=%%i
+          call "%VS%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          where perl nasm nmake
+          cd openssl-src
+          C:\Strawberry\perl\bin\perl.exe Configure VC-WIN64A %OSSL_OPTS% --prefix=%GITHUB_WORKSPACE%\ossl --openssldir=C:\nonexistent\kunuleco-openssl --libdir=lib || exit /b 1
+          nmake /nologo > ..\ossl-make.log 2>&1 || (powershell -Command "Get-Content ..\ossl-make.log -Tail 80" & exit /b 1)
+          nmake /nologo install_sw > NUL || exit /b 1
+
+      - name: Build the wheel
+        shell: cmd
+        run: |
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set VS=%%i
+          call "%VS%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          for /f "usebackq delims=" %%v in (`python .github\scripts\lock.py build_tools.setuptools.version`) do set STV=%%v
+          for /f "usebackq delims=" %%h in (`python .github\scripts\lock.py build_tools.setuptools.sha256`) do set STH=%%h
+          for /f "usebackq delims=" %%w in (`python .github\scripts\lock.py wheel_version`) do set WHEEL_VERSION=%%w
+          echo setuptools==%STV% --hash=sha256:%STH%> req.txt
+          python -m pip install -q --require-hashes --no-deps -r req.txt || exit /b 1
+          python .github\scripts\assemble_sqlcipher3.py .github\sqlcipher3\lock.json sources tree || exit /b 1
+          copy sources\SQLCIPHER_LICENSE.md tree\ && copy sources\OPENSSL_LICENSE.txt tree\
+          cd tree
+          set OPENSSL_PREFIX=%GITHUB_WORKSPACE%\ossl
+          set DISTUTILS_USE_SDK=1
+          python -m pip wheel --no-build-isolation --no-deps -w ..\dist . || exit /b 1
+
+      - name: PROVE it (a fresh venv, this wheel only)
+        shell: cmd
+        run: |
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set VS=%%i
+          call "%VS%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          python -m venv %RUNNER_TEMP%\probe || exit /b 1
+          for %%f in (dist\*.whl) do %RUNNER_TEMP%\probe\Scripts\pip install -q --no-deps --no-index %%f || exit /b 1
+          %RUNNER_TEMP%\probe\Scripts\python -I .github\scripts\prove_sqlcipher.py %CD%\.github\sqlcipher3\lock.json || exit /b 1
+          for /r %RUNNER_TEMP%\probe %%p in (_sqlite3*.pyd) do (dumpbin /nologo /dependents "%%p" & dumpbin /nologo /dependents "%%p" | findstr /i "libcrypto libssl" && exit /b 1)
+          exit /b 0
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-windows-x64
+          path: dist/*.whl
+
+  # ============================================================
+  # Release
+  # ============================================================
+  create-release:
+    name: Create Release
+    needs: [sources, build-linux-x64, build-macos, build-windows-x64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: wheel-*
+          merge-multiple: true
+
+      - name: Hash, and record what went in
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          cp artifacts/*.whl release/
+          cp .github/sqlcipher3/lock.json release/BUILD_LOCK.json
+          cd release
+          ls -1 *.whl | wc -l | grep -qx 4 || { echo "expected 4 wheels"; ls; exit 1; }
+          # These are the hashes the node's installer manifest pins. Do NOT hand-copy them.
+          sha256sum * | tee SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          name: "sqlcipher3 for Kunuleco (${{ inputs.release_tag }})"
+          prerelease: ${{ inputs.prerelease || false }}
+          files: release/*
+          body: |
+            ## sqlcipher3 for Kunuleco (REST-01 / A-E2, RULINGS 248)
+
+            The `sqlcipher3` DB-API binding (sqlcipher3-wheels 0.5.7's C sources, unchanged) over **SQLCipher 4.20.0
+            community (SQLite 3.54.1)**, statically linked against **OpenSSL 3.6.5 built from source** here. Every input is
+            pinned by hash in `BUILD_LOCK.json`; the OpenSSL tarball's signature was verified against its release key.
+
+            OpenSSL is configured static with `no-dso no-module no-autoload-config no-engine no-legacy`. The build defines
+            `SQLITE_OMIT_LOAD_EXTENSION`, so the library cannot load an extension.
+
+            **Every wheel was installed into a fresh venv on the runner that built it and probed:** versions (the provider's
+            runtime version included), no shared OpenSSL, an encrypted file the stdlib and a wrong key refuse, and a flipped
+            bit in a page refused by the page HMAC.
+
+            Licences: the binding is zlib (`LICENSE`), SQLCipher BSD-3-Clause (`SQLCIPHER_LICENSE.md`), OpenSSL Apache-2.0
+            (`OPENSSL_LICENSE.txt`); all three are inside each wheel.
+
+            `SHA256SUMS.txt` holds the hashes for the node's installer manifest.
