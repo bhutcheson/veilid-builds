@@ -59,33 +59,37 @@ jobs:
       - name: OpenSSL -- sha256 AND signature, no fallback
         run: |
           set -euo pipefail
-          L() { python3 .github/scripts/lock.py "$1"; }
+          L() { python3 "$GITHUB_WORKSPACE/.github/scripts/lock.py" "$1"; }
+          # Every lock value is taken in an ASSIGNMENT, where a failed lookup stops the step under set -e (inside an argument
+          # it would not, and an empty value is silently a different build).
+          URL="$(L openssl.url)"; T="openssl-$(L openssl.version).tar.gz"; SHA="$(L openssl.sha256)"
+          FPR="$(L openssl.signing_key_fingerprint)"
           mkdir -p sources && cd sources
-          curl -fsSLO "$(L openssl.url)"
-          curl -fsSLO "$(L openssl.url).asc"
-          T="openssl-$(L openssl.version).tar.gz"
-          echo "$(L openssl.sha256)  $T" | sha256sum -c -
+          curl -fsSLO "$URL"
+          curl -fsSLO "$URL.asc"
+          echo "$SHA  $T" | sha256sum -c -
           export GNUPGHOME="$(mktemp -d)"
           gpg --batch --import ../.github/sqlcipher3/openssl-signing-key.asc
           # VALIDSIG's LAST field is the PRIMARY key's fingerprint: the signature must be good AND made under that certificate.
           gpg --batch --status-fd 1 --verify "$T.asc" "$T" > status.txt
           cat status.txt
           PRIMARY="$(awk '$2 == "VALIDSIG" {print $NF}' status.txt)"
-          test "$PRIMARY" = "$(L openssl.signing_key_fingerprint)" || { echo "signed by $PRIMARY, not the pinned key"; exit 1; }
+          test -n "$FPR" && test "$PRIMARY" = "$FPR" || { echo "signed by $PRIMARY, not the pinned key"; exit 1; }
           rm status.txt "$T.asc"
 
       - name: The binding's sdist -- sha256
         run: |
           set -euo pipefail
-          L() { python3 .github/scripts/lock.py "$1"; }
+          L() { python3 "$GITHUB_WORKSPACE/.github/scripts/lock.py" "$1"; }
+          URL="$(L binding.sdist_url)"; SHA="$(L binding.sdist_sha256)"
           cd sources
-          curl -fsSLO "$(L binding.sdist_url)"
-          echo "$(L binding.sdist_sha256)  $(basename "$(L binding.sdist_url)")" | sha256sum -c -
+          curl -fsSLO "$URL"
+          echo "$SHA  $(basename "$URL")" | sha256sum -c -
 
       - name: SQLCipher -- the pinned commit, then the amalgamation's sha256
         run: |
           set -euo pipefail
-          L() { python3 .github/scripts/lock.py "$1"; }
+          L() { python3 "$GITHUB_WORKSPACE/.github/scripts/lock.py" "$1"; }
           git clone --quiet --depth 1 --branch "$(L sqlcipher.tag)" "$(L sqlcipher.repo)" sqlcipher
           test "$(git -C sqlcipher rev-parse HEAD)" = "$(L sqlcipher.commit)" || { echo "the tag moved"; exit 1; }
           mkdir amalg && cd amalg
@@ -128,15 +132,17 @@ jobs:
       - name: Build OpenSSL (static, from the verified tarball)
         run: |
           set -euo pipefail
-          L() { $PY .github/scripts/lock.py "$1"; }
+          L() { $PY "$GITHUB_WORKSPACE/.github/scripts/lock.py" "$1"; }
           # OpenSSL's Configure needs perl's IPC::Cmd and Time::Piece, which AlmaLinux 8 ships separately.
           dnf install -y -q perl-IPC-Cmd perl-Time-Piece
-          T="sources/openssl-$(L openssl.version).tar.gz"
-          echo "$(L openssl.sha256)  $T" | sha256sum -c -
+          V="$(L openssl.version)"; SHA="$(L openssl.sha256)"; OPTS="$(L openssl.configure_options)"; DIR="$(L openssl.openssldir)"
+          test -n "$OPTS" -a -n "$DIR"
+          T="sources/openssl-$V.tar.gz"
+          echo "$SHA  $T" | sha256sum -c -
           tar xzf "$T"
-          cd "openssl-$(L openssl.version)"
-          ./Configure linux-x86_64 $(L openssl.configure_options) -fPIC \
-            --prefix="$GITHUB_WORKSPACE/ossl" --openssldir="$(L openssl.openssldir)" --libdir=lib
+          cd "openssl-$V"
+          ./Configure linux-x86_64 $OPTS -fPIC \
+            --prefix="$GITHUB_WORKSPACE/ossl" --openssldir="$DIR" --libdir=lib
           make -j"$(nproc)" > ../ossl-make.log 2>&1 || { tail -80 ../ossl-make.log; exit 1; }
           make install_sw > /dev/null
           cp LICENSE.txt ../sources/OPENSSL_LICENSE.txt
@@ -144,13 +150,14 @@ jobs:
       - name: Build the wheel
         run: |
           set -euo pipefail
-          L() { $PY .github/scripts/lock.py "$1"; }
+          L() { $PY "$GITHUB_WORKSPACE/.github/scripts/lock.py" "$1"; }
           printf 'setuptools==%s --hash=sha256:%s\n' "$(L build_tools.setuptools.version)" "$(L build_tools.setuptools.sha256)" > req.txt
           $PY -m pip install -q --require-hashes --no-deps -r req.txt
           $PY .github/scripts/assemble_sqlcipher3.py .github/sqlcipher3/lock.json sources tree
           cp sources/SQLCIPHER_LICENSE.md sources/OPENSSL_LICENSE.txt tree/
+          WV="$(L wheel_version)"
           cd tree
-          OPENSSL_PREFIX="$GITHUB_WORKSPACE/ossl" WHEEL_VERSION="$(L wheel_version)" \
+          OPENSSL_PREFIX="$GITHUB_WORKSPACE/ossl" WHEEL_VERSION="$WV" \
             $PY -m pip wheel --no-build-isolation --no-deps -w ../raw .
           cd ..
           auditwheel show raw/*.whl
@@ -215,13 +222,15 @@ jobs:
       - name: Build OpenSSL (static, from the verified tarball)
         run: |
           set -euo pipefail
-          L() { python .github/scripts/lock.py "$1"; }
-          T="sources/openssl-$(L openssl.version).tar.gz"
-          echo "$(L openssl.sha256)  $T" | shasum -a 256 -c -
+          L() { python "$GITHUB_WORKSPACE/.github/scripts/lock.py" "$1"; }
+          V="$(L openssl.version)"; SHA="$(L openssl.sha256)"; OPTS="$(L openssl.configure_options)"; DIR="$(L openssl.openssldir)"
+          test -n "$OPTS" -a -n "$DIR"
+          T="sources/openssl-$V.tar.gz"
+          echo "$SHA  $T" | shasum -a 256 -c -
           tar xzf "$T"
-          cd "openssl-$(L openssl.version)"
-          ./Configure ${{ matrix.target }} $(L openssl.configure_options) \
-            --prefix="$GITHUB_WORKSPACE/ossl" --openssldir="$(L openssl.openssldir)" --libdir=lib
+          cd "openssl-$V"
+          ./Configure ${{ matrix.target }} $OPTS \
+            --prefix="$GITHUB_WORKSPACE/ossl" --openssldir="$DIR" --libdir=lib
           make -j"$(sysctl -n hw.ncpu)" > ../ossl-make.log 2>&1 || { tail -80 ../ossl-make.log; exit 1; }
           make install_sw > /dev/null
           cp LICENSE.txt ../sources/OPENSSL_LICENSE.txt
@@ -230,13 +239,14 @@ jobs:
       - name: Build the wheel
         run: |
           set -euo pipefail
-          L() { python .github/scripts/lock.py "$1"; }
+          L() { python "$GITHUB_WORKSPACE/.github/scripts/lock.py" "$1"; }
           printf 'setuptools==%s --hash=sha256:%s\n' "$(L build_tools.setuptools.version)" "$(L build_tools.setuptools.sha256)" > req.txt
           python -m pip install -q --require-hashes --no-deps -r req.txt
           python .github/scripts/assemble_sqlcipher3.py .github/sqlcipher3/lock.json sources tree
           cp sources/SQLCIPHER_LICENSE.md sources/OPENSSL_LICENSE.txt tree/
+          WV="$(L wheel_version)"
           cd tree
-          OPENSSL_PREFIX="$GITHUB_WORKSPACE/ossl" WHEEL_VERSION="$(L wheel_version)" \
+          OPENSSL_PREFIX="$GITHUB_WORKSPACE/ossl" WHEEL_VERSION="$WV" \
             python -m pip wheel --no-build-isolation --no-deps -w ../dist .
           ls -la ../dist
 
@@ -279,17 +289,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          L() { python .github/scripts/lock.py "$1"; }
-          curl -fsSLo nasm.zip "$(L build_tools.nasm.url)"
-          echo "$(L build_tools.nasm.sha256)  nasm.zip" | sha256sum -c -
+          L() { python "$GITHUB_WORKSPACE/.github/scripts/lock.py" "$1"; }
+          NURL="$(L build_tools.nasm.url)"; NSHA="$(L build_tools.nasm.sha256)"; NV="$(L build_tools.nasm.version)"
+          V="$(L openssl.version)"; SHA="$(L openssl.sha256)"; OPTS="$(L openssl.configure_options)"
+          test -n "$OPTS"
+          curl -fsSLo nasm.zip "$NURL"
+          echo "$NSHA  nasm.zip" | sha256sum -c -
           unzip -q nasm.zip -d nasm
-          echo "$PWD/nasm/nasm-$(L build_tools.nasm.version)" >> "$GITHUB_PATH"
-          T="sources/openssl-$(L openssl.version).tar.gz"
-          echo "$(L openssl.sha256)  $T" | sha256sum -c -
+          echo "$PWD/nasm/nasm-$NV" >> "$GITHUB_PATH"
+          T="sources/openssl-$V.tar.gz"
+          echo "$SHA  $T" | sha256sum -c -
           tar xzf "$T"
-          mv "openssl-$(L openssl.version)" openssl-src
+          mv "openssl-$V" openssl-src
           cp openssl-src/LICENSE.txt sources/OPENSSL_LICENSE.txt
-          echo "OSSL_OPTS=$(L openssl.configure_options)" >> "$GITHUB_ENV"
+          echo "OSSL_OPTS=$OPTS" >> "$GITHUB_ENV"
 
       - name: Build OpenSSL (static; /MT /Zl, so it links into Python's /MD extension)
         shell: cmd

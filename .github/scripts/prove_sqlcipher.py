@@ -123,6 +123,22 @@ def main(lock_path):
             refused = True
         conn.close()
         check(refused, "NEGATIVE CONTROL: a flipped bit in an encrypted page is refused (HMAC)")
+
+        # no-autoload-config, proven rather than assumed: an openssl.cnf that activates ONLY the null provider would leave
+        # OpenSSL with no AES and no HMAC if the library read it, so the keyed open below would fail. Built with
+        # no-autoload-config it never reads one, wherever OPENSSL_CONF points. (A build with the default, which reads it, fails
+        # here: measured on the PyPI 0.5.7 wheel.)
+        conf = os.path.join(tmp, "planted.cnf")
+        open(conf, "w").write("openssl_conf = init\n[init]\nproviders = prov\n[prov]\nnull = null_sect\n"
+                              "[null_sect]\nactivate = 1\n")
+        child = ("import sys; from sqlcipher3 import dbapi2; c = dbapi2.connect(sys.argv[1]); "
+                 "c.execute('PRAGMA key = \"' + sys.argv[2] + '\"'); print(c.execute('SELECT count(*) FROM t').fetchone()[0])")
+        import subprocess
+        env = dict(os.environ, OPENSSL_CONF=conf)
+        run = subprocess.run([sys.executable, "-I", "-c", child, path, RAW_KEY], env=env, capture_output=True, text=True)
+        check(run.returncode == 0 and run.stdout.strip() == "200",
+              f"an openssl.cnf planted through OPENSSL_CONF is never read (no-autoload-config): rc={run.returncode} "
+              f"out={run.stdout.strip()!r} err={run.stderr.strip()[-200:]!r}")
     print("PASS")
 
 
