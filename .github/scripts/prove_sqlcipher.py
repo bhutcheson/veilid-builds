@@ -47,7 +47,8 @@ def one(conn, sql):
 
 
 def main(lock_path):
-    lock = json.load(open(lock_path))
+    with open(lock_path) as f:
+        lock = json.load(f)
     import sqlcipher3._sqlite3 as _ext
     from sqlcipher3 import dbapi2
 
@@ -57,7 +58,8 @@ def main(lock_path):
     exts = [f for f in os.listdir(pkg) if f.endswith((".so", ".pyd", ".dylib"))]
     check(len(exts) == 1, f"exactly one extension module in the package: {exts}")
 
-    blob = open(ext, "rb").read()
+    with open(ext, "rb") as f:
+        blob = f.read()
     named = [n.decode() for n in SHARED_OPENSSL_NAMES if n in blob]
     check(not named, f"the extension names no shared OpenSSL library: {named}")
 
@@ -82,16 +84,22 @@ def main(lock_path):
         conn.commit()
         conn.close()
 
-        raw = open(path, "rb").read()
+        with open(path, "rb") as f:
+            raw = f.read()
         check(not raw.startswith(b"SQLite format 3\x00"), "the file has no plaintext SQLite header")
         check(b"row 1 yyyy" not in raw, "the rows are not in the file in plaintext")
 
+        # 🔴 Every connection is closed in a `finally`: Windows will not delete a file a handle still holds, so a leak fails the
+        # TemporaryDirectory cleanup (run 43164498626: this stdlib connection was never closed). Do not paper over it with
+        # ignore_cleanup_errors; a handle left open is worth knowing about.
+        plain = sqlite3.connect(path)
         try:
-            plain = sqlite3.connect(path)
             plain.execute("SELECT count(*) FROM sqlite_master").fetchone()
             refused = False
         except sqlite3.DatabaseError:
             refused = True
+        finally:
+            plain.close()
         check(refused, "Python's own sqlite3 refuses the file")
 
         wrong = dbapi2.connect(path)
@@ -101,19 +109,24 @@ def main(lock_path):
             refused = False
         except dbapi2.DatabaseError:
             refused = True
-        wrong.close()
+        finally:
+            wrong.close()
         check(refused, "a wrong key is refused")
 
         right = dbapi2.connect(path)
-        right.execute(f'PRAGMA key = "{RAW_KEY}"')
-        check(one(right, "SELECT count(*) FROM t") == 200, "the right key reads back the 200 rows")
-        page = int(one(right, "PRAGMA cipher_page_size"))
-        right.close()
+        try:
+            right.execute(f'PRAGMA key = "{RAW_KEY}"')
+            rows = one(right, "SELECT count(*) FROM t")
+            page = int(one(right, "PRAGMA cipher_page_size"))
+        finally:
+            right.close()
+        check(rows == 200, "the right key reads back the 200 rows")
 
         tampered = bytearray(raw)
         tampered[page + page // 2] ^= 0x01                       # one bit in the middle of page 2's ciphertext
         bad = os.path.join(tmp, "tampered.db")
-        open(bad, "wb").write(bytes(tampered))
+        with open(bad, "wb") as f:
+            f.write(bytes(tampered))
         conn = dbapi2.connect(bad)
         conn.execute(f'PRAGMA key = "{RAW_KEY}"')
         try:
@@ -121,7 +134,8 @@ def main(lock_path):
             refused = False
         except dbapi2.DatabaseError:
             refused = True
-        conn.close()
+        finally:
+            conn.close()
         check(refused, "NEGATIVE CONTROL: a flipped bit in an encrypted page is refused (HMAC)")
 
         # no-autoload-config, proven rather than assumed: an openssl.cnf that activates ONLY the null provider would leave
@@ -129,8 +143,9 @@ def main(lock_path):
         # no-autoload-config it never reads one, wherever OPENSSL_CONF points. (A build with the default, which reads it, fails
         # here: measured on the PyPI 0.5.7 wheel.)
         conf = os.path.join(tmp, "planted.cnf")
-        open(conf, "w").write("openssl_conf = init\n[init]\nproviders = prov\n[prov]\nnull = null_sect\n"
-                              "[null_sect]\nactivate = 1\n")
+        with open(conf, "w") as f:
+            f.write("openssl_conf = init\n[init]\nproviders = prov\n[prov]\nnull = null_sect\n"
+                    "[null_sect]\nactivate = 1\n")
         child = ("import sys; from sqlcipher3 import dbapi2; c = dbapi2.connect(sys.argv[1]); "
                  "c.execute('PRAGMA key = \"' + sys.argv[2] + '\"'); print(c.execute('SELECT count(*) FROM t').fetchone()[0])")
         import subprocess
