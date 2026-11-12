@@ -197,7 +197,7 @@ jobs:
             arch: x86_64
             target: darwin64-x86_64-cc
             deployment: '10.15'
-          - os: macos-14
+          - os: macos-15
             label: macOS ARM64
             slug: macos-arm64
             arch: arm64
