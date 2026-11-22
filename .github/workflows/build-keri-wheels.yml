@@ -1,0 +1,165 @@
+# .github/workflows/build-keri-wheels.yml
+#
+# Build the keri, pysodium and hio wheels the Kunuleco node ships (SUP-242 residual, Brad 2026-11-21 19:44, option 1).
+#
+# WHY THIS EXISTS
+# ---------------
+# keri 1.3.6, pysodium 0.7.19 and hio 0.7.20 publish NO wheel on PyPI, only an sdist. The node's release build used to run
+# `pip wheel` on each, so the packages' own setup.py ran on the release machine, as the person who holds the signing key. This
+# workflow builds them ONCE, here, on a runner that holds no key, and publishes the wheels with their hashes. The node's
+# tools/sdist_only_wheels.py pins those hashes, and the release build fetches and verifies the wheels instead of building them.
+#
+# ⚠️ SUPPLY CHAIN, as in build-sqlcipher3.yml: nothing is fetched by name alone, and there is NO fallback path.
+#   - Each sdist is fetched by its URL and must have the sha256 in .github/keri-wheels/lock.json (PyPI's own digest).
+#   - The build backend is ONE hash-pinned setuptools wheel, installed with --no-index into a fresh venv; the wheels are built
+#     with --no-build-isolation --no-deps --no-index, so pip fetches nothing else and runs no other build code.
+#   - None of the three has a pyproject.toml or setup_requires (read 2026-11-21), so setuptools alone is the backend.
+#
+# ⚠️ EVERY WHEEL IS PROVED before release: exactly one per sdist, py3-none-any (the node fans ONE copy out to every platform's
+# wheelhouse, which is only right for pure Python), no compiled file inside, its METADATA name and version equal the lock's, and
+# it carries its licence file, and it installs into a fresh venv with --no-deps --no-index.
+#
+# SOURCE_DATE_EPOCH (the lock's) fixes the wheels' zip timestamps.
+
+name: Build keri Wheels
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Tag for the release (e.g. keri-wheels-kunuleco.1)'
+        required: true
+        type: string
+      prerelease:
+        description: 'Mark as prerelease'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  build:
+    name: Fetch, verify, build and prove
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Fetch every input -- sha256, no fallback
+        run: |
+          set -euo pipefail
+          mkdir -p sources
+          python3 -I - <<'EOF'
+          import hashlib, json, sys, urllib.request
+          lock = json.load(open(".github/keri-wheels/lock.json"))
+          items = [(s["url"], s["sha256"]) for s in lock["sdists"]]
+          items.append((lock["build_backend"]["url"], lock["build_backend"]["sha256"]))
+          for url, want in items:
+              name = url.rsplit("/", 1)[1]
+              data = urllib.request.urlopen(url, timeout=120).read()
+              got = hashlib.sha256(data).hexdigest()
+              print(name, got)
+              if got != want:
+                  sys.exit(f"{name}: sha256 {got}, the lock says {want}")
+              open(f"sources/{name}", "wb").write(data)
+          EOF
+
+      - name: Build (the pinned setuptools only, nothing fetched)
+        run: |
+          set -euo pipefail
+          export SOURCE_DATE_EPOCH="$(python3 -c 'import json; print(json.load(open(".github/keri-wheels/lock.json"))["source_date_epoch"])')"
+          test -n "$SOURCE_DATE_EPOCH"
+          python3 -m venv "$RUNNER_TEMP/build"
+          B="$RUNNER_TEMP/build/bin"
+          BACKEND="$(python3 -c 'import json; print(json.load(open(".github/keri-wheels/lock.json"))["build_backend"]["filename"])')"
+          "$B/pip" install -q --no-deps --no-index "sources/$BACKEND"
+          mkdir -p dist
+          for sdist in sources/*.tar.gz; do
+            "$B/pip" wheel --no-build-isolation --no-deps --no-index -w dist "$sdist"
+          done
+          ls -l dist
+
+      - name: PROVE each wheel
+        run: |
+          set -euo pipefail
+          python3 -I - <<'EOF'
+          import json, re, sys, zipfile
+          from pathlib import Path
+          lock = json.load(open(".github/keri-wheels/lock.json"))
+          wheels = sorted(Path("dist").glob("*.whl"))
+          if len(wheels) != len(lock["sdists"]):
+              sys.exit(f"{len(wheels)} wheels for {len(lock['sdists'])} sdists: {[w.name for w in wheels]}")
+          for s in lock["sdists"]:
+              want = f"{s['name']}-{s['version']}-py3-none-any.whl"
+              whl = Path("dist") / want
+              if not whl.is_file():
+                  sys.exit(f"no {want} (built: {[w.name for w in wheels]}); a wheel that is not py3-none-any cannot be fanned out")
+              with zipfile.ZipFile(whl) as z:
+                  names = z.namelist()
+                  compiled = [n for n in names if re.search(r"\.(so|pyd|dylib|dll)$", n)]
+                  if compiled:
+                      sys.exit(f"{want} holds compiled files: {compiled}")
+                  meta = next(n for n in names if n.endswith(".dist-info/METADATA"))
+                  text = z.read(meta).decode()
+                  name = re.search(r"^Name: (.+)$", text, re.M).group(1).strip()
+                  version = re.search(r"^Version: (.+)$", text, re.M).group(1).strip()
+                  if (name.lower(), version) != (s["name"], s["version"]):
+                      sys.exit(f"{want}: METADATA says {name} {version}")
+                  if not [n for n in names if re.search(r"\.dist-info/(licenses/)?LICEN[CS]E", n)]:
+                      sys.exit(f"{want} carries no licence file")
+              print("OK", want)
+          EOF
+          python3 -m venv "$RUNNER_TEMP/probe"
+          "$RUNNER_TEMP/probe/bin/pip" install -q --no-deps --no-index dist/*.whl
+          "$RUNNER_TEMP/probe/bin/pip" list
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: keri-wheels
+          path: dist/*.whl
+
+  create-release:
+    name: Create Release
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: keri-wheels
+          path: artifacts
+
+      - name: Hash, and record what went in
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          cp artifacts/*.whl release/
+          cp .github/keri-wheels/lock.json release/BUILD_LOCK.json
+          cd release
+          ls -1 *.whl | wc -l | grep -qx 3 || { echo "expected 3 wheels"; ls; exit 1; }
+          # These are the hashes tools/sdist_only_wheels.py pins. Do NOT hand-copy them.
+          sha256sum * | tee SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          name: "keri, pysodium and hio wheels for Kunuleco (${{ inputs.release_tag }})"
+          prerelease: ${{ inputs.prerelease || false }}
+          files: release/*
+          body: |
+            ## keri, pysodium and hio wheels for Kunuleco (SUP-242 residual)
+
+            keri 1.3.6, pysodium 0.7.19 and hio 0.7.20 publish only an sdist on PyPI. These wheels were built from PyPI's
+            sdists, each checked against PyPI's sha256, with one hash-pinned setuptools as the only build code
+            (`--no-build-isolation --no-deps --no-index`). `BUILD_LOCK.json` holds every input.
+
+            Every wheel was checked before this release: py3-none-any, no compiled file, METADATA's name and version as
+            locked, and an install into a fresh venv.
+
+            Licences: keri and hio are Apache-2.0, pysodium is BSD (its LICENSE.txt); each wheel carries its own licence file.
+
+            `SHA256SUMS.txt` holds the hashes the node's `tools/sdist_only_wheels.py` pins.
