@@ -144,22 +144,31 @@ jobs:
           # These are the hashes tools/sdist_only_wheels.py pins. Do NOT hand-copy them.
           sha256sum * | tee SHA256SUMS.txt
 
-      - uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ${{ inputs.release_tag }}
-          name: "keri, pysodium and hio wheels for Kunuleco (${{ inputs.release_tag }})"
-          prerelease: ${{ inputs.prerelease || false }}
-          files: release/*
-          body: |
-            ## keri, pysodium and hio wheels for Kunuleco (SUP-242 residual)
+      # SERVER 2026-11-21 22:4x: the runner's own `gh`, not a third-party action. An action holding contents: write could swap
+      # the wheels and SHA256SUMS.txt in one step, and this repository is public and these wheels are a trust root.
+      - name: Publish the release (gh, the runner's own)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          test -n "$TAG"
+          cat > "$RUNNER_TEMP/notes.md" <<'EOF'
+          ## keri, pysodium and hio wheels for Kunuleco (SUP-242 residual)
 
-            keri 1.3.6, pysodium 0.7.19 and hio 0.7.20 publish only an sdist on PyPI. These wheels were built from PyPI's
-            sdists, each checked against PyPI's sha256, with one hash-pinned setuptools as the only build code
-            (`--no-build-isolation --no-deps --no-index`). `BUILD_LOCK.json` holds every input.
+          keri 1.3.6, pysodium 0.7.19 and hio 0.7.20 publish only an sdist on PyPI. These wheels were built from PyPI's
+          sdists, each checked against PyPI's sha256, with one hash-pinned setuptools as the only build code
+          (`--no-build-isolation --no-deps --no-index`). `BUILD_LOCK.json` holds every input.
 
-            Every wheel was checked before this release: py3-none-any, no compiled file, METADATA's name and version as
-            locked, and an install into a fresh venv.
+          Every wheel was checked before this release: py3-none-any, no compiled file, METADATA's name and version as
+          locked, a licence file inside, and an install into a fresh venv.
 
-            Licences: keri and hio are Apache-2.0, pysodium is BSD (its LICENSE.txt); each wheel carries its own licence file.
+          Licences: keri and hio are Apache-2.0, pysodium is BSD (its LICENSE.txt); each wheel carries its own licence file.
 
-            `SHA256SUMS.txt` holds the hashes the node's `tools/sdist_only_wheels.py` pins.
+          `SHA256SUMS.txt` holds the hashes the node's `tools/sdist_only_wheels.py` pins, once an independent rebuild matched them.
+          EOF
+          extra=()
+          [ "$PRERELEASE" = "true" ] && extra+=(--prerelease)
+          gh release create "$TAG" release/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "keri, pysodium and hio wheels for Kunuleco ($TAG)" --notes-file "$RUNNER_TEMP/notes.md" "${extra[@]}"
