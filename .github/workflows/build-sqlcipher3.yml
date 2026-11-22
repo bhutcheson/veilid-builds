@@ -51,7 +51,7 @@ jobs:
     outputs:
       manylinux_image: ${{ steps.lock.outputs.manylinux_image }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - id: lock
         run: echo "manylinux_image=$(python3 .github/scripts/lock.py build_tools.manylinux_image)" >> "$GITHUB_OUTPUT"
@@ -107,7 +107,7 @@ jobs:
           cp sqlite3.c sqlite3.h ../sources/
           cp ../sqlcipher/LICENSE.md ../sources/SQLCIPHER_LICENSE.md
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sqlcipher3-sources
           path: sources
@@ -123,8 +123,8 @@ jobs:
     env:
       PY: /opt/python/cp314-cp314/bin/python
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: sqlcipher3-sources
           path: sources
@@ -174,7 +174,7 @@ jobs:
           readelf -d "$SO" | grep NEEDED
           ! readelf -d "$SO" | grep -E 'NEEDED.*lib(crypto|ssl)'
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: wheel-linux-x64
           path: dist/*.whl
@@ -210,11 +210,11 @@ jobs:
       ARCHFLAGS: -arch ${{ matrix.arch }}
       _PYTHON_HOST_PLATFORM: macosx-${{ matrix.deployment }}-${{ matrix.arch }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.14'
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: sqlcipher3-sources
           path: sources
@@ -262,7 +262,7 @@ jobs:
           lipo -info "$SO"
           case "$(lipo -archs "$SO")" in ${{ matrix.arch }}) ;; *) echo "wrong arch"; exit 1;; esac
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: wheel-${{ matrix.slug }}
           path: dist/*.whl
@@ -275,12 +275,12 @@ jobs:
     needs: sources
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.14'
           architecture: x64
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: sqlcipher3-sources
           path: sources
@@ -343,7 +343,7 @@ jobs:
           for /r %RUNNER_TEMP%\probe %%p in (_sqlite3*.pyd) do (dumpbin /nologo /dependents "%%p" & dumpbin /nologo /dependents "%%p" | findstr /i "libcrypto libssl" && exit /b 1)
           exit /b 0
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: wheel-windows-x64
           path: dist/*.whl
@@ -358,8 +358,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
           pattern: wheel-*
@@ -376,27 +376,36 @@ jobs:
           # These are the hashes the node's installer manifest pins. Do NOT hand-copy them.
           sha256sum * | tee SHA256SUMS.txt
 
-      - uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ${{ inputs.release_tag }}
-          name: "sqlcipher3 for Kunuleco (${{ inputs.release_tag }})"
-          prerelease: ${{ inputs.prerelease || false }}
-          files: release/*
-          body: |
-            ## sqlcipher3 for Kunuleco (REST-01 / A-E2, RULINGS 248)
+      # R742 (SERVER 2026-11-21 23:5x): the runner's own `gh`, not a third-party action holding contents: write, which could swap
+      # the wheels and SHA256SUMS.txt in one step (as build-keri-wheels.yml).
+      - name: Publish the release (gh, the runner's own)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          test -n "$TAG"
+          cat > "$RUNNER_TEMP/notes.md" <<'EOF'
+          ## sqlcipher3 for Kunuleco (REST-01 / A-E2, RULINGS 248)
 
-            The `sqlcipher3` DB-API binding (sqlcipher3-wheels 0.5.7's C sources, unchanged) over **SQLCipher 4.20.0
-            community (SQLite 3.54.1)**, statically linked against **OpenSSL 3.6.5 built from source** here. Every input is
-            pinned by hash in `BUILD_LOCK.json`; the OpenSSL tarball's signature was verified against its release key.
+          The `sqlcipher3` DB-API binding (sqlcipher3-wheels 0.5.7's C sources, unchanged) over **SQLCipher 4.20.0
+          community (SQLite 3.54.1)**, statically linked against **OpenSSL 3.6.5 built from source** here. Every input is
+          pinned by hash in `BUILD_LOCK.json`; the OpenSSL tarball's signature was verified against its release key.
 
-            OpenSSL is configured static with `no-dso no-module no-autoload-config no-engine no-legacy`. The build defines
-            `SQLITE_OMIT_LOAD_EXTENSION`, so the library cannot load an extension.
+          OpenSSL is configured static with `no-dso no-module no-autoload-config no-engine no-legacy`. The build defines
+          `SQLITE_OMIT_LOAD_EXTENSION`, so the library cannot load an extension.
 
-            **Every wheel was installed into a fresh venv on the runner that built it and probed:** versions (the provider's
-            runtime version included), no shared OpenSSL, an encrypted file the stdlib and a wrong key refuse, and a flipped
-            bit in a page refused by the page HMAC.
+          **Every wheel was installed into a fresh venv on the runner that built it and probed:** versions (the provider's
+          runtime version included), no shared OpenSSL, an encrypted file the stdlib and a wrong key refuse, and a flipped
+          bit in a page refused by the page HMAC.
 
-            Licences: the binding is zlib (`LICENSE`), SQLCipher BSD-3-Clause (`SQLCIPHER_LICENSE.md`), OpenSSL Apache-2.0
-            (`OPENSSL_LICENSE.txt`); all three are inside each wheel.
+          Licences: the binding is zlib (`LICENSE`), SQLCipher BSD-3-Clause (`SQLCIPHER_LICENSE.md`), OpenSSL Apache-2.0
+          (`OPENSSL_LICENSE.txt`); all three are inside each wheel.
 
-            `SHA256SUMS.txt` holds the hashes for the node's installer manifest.
+          `SHA256SUMS.txt` holds the hashes for the node's installer manifest.
+          EOF
+          extra=()
+          [ "$PRERELEASE" = "true" ] && extra+=(--prerelease)
+          gh release create "$TAG" release/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "sqlcipher3 for Kunuleco ($TAG)" --notes-file "$RUNNER_TEMP/notes.md" "${extra[@]}"

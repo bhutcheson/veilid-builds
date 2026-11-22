@@ -73,12 +73,12 @@ jobs:
           echo "Building Veilid version ${VERSION}"
           
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch, 2026-11-15
         with:
           toolchain: ${{ env.RUST_VERSION }}
           
       - name: Cache Cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -143,7 +143,7 @@ jobs:
           sha256sum veilid-linux-x64.tar.gz > veilid-linux-x64.tar.gz.sha256
           
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: veilid-linux-x64
           path: |
@@ -175,12 +175,12 @@ jobs:
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch, 2026-11-15
         with:
           toolchain: ${{ env.RUST_VERSION }}
           
       - name: Cache Cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -232,7 +232,7 @@ jobs:
           "$hash  veilid-windows-x64.zip" | Out-File -FilePath "dist\veilid-windows-x64.zip.sha256" -Encoding utf8
           
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: veilid-windows-x64
           path: |
@@ -263,12 +263,12 @@ jobs:
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch, 2026-11-15
         with:
           toolchain: ${{ env.RUST_VERSION }}
           
       - name: Cache Cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -316,7 +316,7 @@ jobs:
           shasum -a 256 veilid-macos-x64.tar.gz > veilid-macos-x64.tar.gz.sha256
           
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: veilid-macos-x64
           path: |
@@ -347,12 +347,12 @@ jobs:
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch, 2026-11-15
         with:
           toolchain: ${{ env.RUST_VERSION }}
           
       - name: Cache Cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -400,7 +400,7 @@ jobs:
           shasum -a 256 veilid-macos-arm64.tar.gz > veilid-macos-arm64.tar.gz.sha256
           
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: veilid-macos-arm64
           path: |
@@ -419,7 +419,7 @@ jobs:
     
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
           
@@ -486,7 +486,7 @@ jobs:
           cat manifest-fragment.json
           
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v0.1.15
         with:
           tag_name: ${{ inputs.release_tag || github.ref_name }}
           name: "Veilid ${{ inputs.veilid_ref || github.ref_name }} for Kunuleco"

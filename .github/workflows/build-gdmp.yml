@@ -124,14 +124,14 @@ jobs:
       SDK_VERSION: '25.08'
     steps:
       - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@0.19.0
+        uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
         with:
           cache-save: true
           disk-cache: gdmp-linux-x86_64
           external-cache: true
 
       - name: Checkout GDMP
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           repository: ${{ env.GDMP_REPO }}
           ref: ${{ inputs.gdmp_ref }}
@@ -170,7 +170,7 @@ jobs:
           EOF
 
       - name: Upload
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: GDMP-linux-x86_64
           path: gdmp/build/*
@@ -183,14 +183,14 @@ jobs:
     runs-on: windows-2022
     steps:
       - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@0.19.0
+        uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
         with:
           cache-save: true
           disk-cache: gdmp-windows-x86_64
           external-cache: true
 
       - name: Checkout GDMP
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           repository: ${{ env.GDMP_REPO }}
           ref: ${{ inputs.gdmp_ref }}
@@ -208,7 +208,7 @@ jobs:
         run: python ./build.py desktop --arch x86_64 --output build/x86_64
 
       - name: Upload
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: GDMP-windows-x86_64
           path: gdmp/build/*
@@ -224,14 +224,14 @@ jobs:
         arch: ['arm64', 'x86_64']
     steps:
       - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@0.19.0
+        uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
         with:
           cache-save: true
           disk-cache: gdmp-macos-${{ matrix.arch }}
           external-cache: true
 
       - name: Checkout GDMP
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           repository: ${{ env.GDMP_REPO }}
           ref: ${{ inputs.gdmp_ref }}
@@ -247,7 +247,7 @@ jobs:
         run: python ./build.py desktop --arch ${{ matrix.arch }} --output build/${{ matrix.arch }}
 
       - name: Upload
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: GDMP-macos-${{ matrix.arch }}
           path: gdmp/build/*
@@ -263,17 +263,17 @@ jobs:
         arch: ['arm64', 'x86_64']
     steps:
       - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@0.19.0
+        uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
         with:
           cache-save: true
           disk-cache: gdmp-android-${{ matrix.arch }}
           external-cache: true
 
       - name: Checkout this repo (for the proof scripts)
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Checkout GDMP
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           repository: ${{ env.GDMP_REPO }}
           ref: ${{ inputs.gdmp_ref }}
@@ -307,7 +307,7 @@ jobs:
             --negative known-bad/addons/GDMP/libs/arm64/libGDMP.android.so
 
       - name: Upload
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: GDMP-android-${{ matrix.arch }}
           path: gdmp/build/*
@@ -321,17 +321,17 @@ jobs:
     needs: build-linux
     steps:
       - name: Checkout this repo (for the proof scripts)
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Checkout GDMP (for the addon tree it ships)
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           repository: ${{ env.GDMP_REPO }}
           ref: ${{ inputs.gdmp_ref }}
           path: gdmp
 
       - name: Download the built library
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: GDMP-linux-x86_64
           path: built
@@ -426,17 +426,17 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout this repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Checkout GDMP
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           repository: ${{ env.GDMP_REPO }}
           ref: ${{ inputs.gdmp_ref }}
           path: gdmp
 
       - name: Download the built library
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ matrix.artifact }}
           path: built
@@ -480,14 +480,14 @@ jobs:
       contents: write
     steps:
       - name: Checkout GDMP
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           repository: ${{ env.GDMP_REPO }}
           ref: ${{ inputs.gdmp_ref }}
           path: gdmp
 
       - name: Download every artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
           pattern: GDMP-*

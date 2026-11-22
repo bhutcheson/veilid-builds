@@ -41,9 +41,9 @@ jobs:
     name: Fetch, verify, build and prove
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.14'
 
@@ -69,6 +69,10 @@ jobs:
       - name: Build (the pinned setuptools only, nothing fetched)
         run: |
           set -euo pipefail
+          # The umask is an input of the wheels' bytes: setuptools copies each extracted file's mode into the zip. Measured
+          # 2026-11-21: a rebuild under umask 0002 differed from this job's in every member's mode (0o100664 against 0o100644)
+          # and in nothing else; under 0022 it matched byte for byte. Set here so it is not the runner's default.
+          umask 022
           export SOURCE_DATE_EPOCH="$(python3 -c 'import json; print(json.load(open(".github/keri-wheels/lock.json"))["source_date_epoch"])')"
           test -n "$SOURCE_DATE_EPOCH"
           python3 -m venv "$RUNNER_TEMP/build"
@@ -115,7 +119,7 @@ jobs:
           "$RUNNER_TEMP/probe/bin/pip" install -q --no-deps --no-index dist/*.whl
           "$RUNNER_TEMP/probe/bin/pip" list
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: keri-wheels
           path: dist/*.whl
@@ -127,8 +131,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: keri-wheels
           path: artifacts

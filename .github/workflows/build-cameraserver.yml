@@ -66,14 +66,14 @@ jobs:
     runs-on: windows-2022
     steps:
       - name: Checkout the extension
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           repository: ${{ inputs.repo }}
           ref: ${{ inputs.ref }}
           submodules: recursive
 
       - name: Setup Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: 3.x
 
@@ -89,7 +89,7 @@ jobs:
         run: scons api_version=4.4 arch=x86_64 target=template_release
 
       - name: Upload
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: CSE-windows-x86_64
           path: addons/CameraServerExtension/x86_64/libcameraserver-extension.windows.dll
@@ -119,14 +119,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout the extension
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           repository: ${{ inputs.repo }}
           ref: ${{ inputs.ref }}
           submodules: recursive
 
       - name: Setup Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: 3.x
 
@@ -140,7 +140,7 @@ jobs:
         run: scons api_version=4.4 arch=x86_64 target=template_release backend=dummy
 
       - name: Upload
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: CSE-linux-x86_64
           path: addons/CameraServerExtension/x86_64/libcameraserver-extension.linux.so
@@ -167,14 +167,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout the extension
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           repository: ${{ inputs.repo }}
           ref: ${{ inputs.ref }}
           path: cse
 
       - name: Download the built library
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ matrix.artifact }}
           path: built
@@ -229,14 +229,14 @@ jobs:
       contents: write
     steps:
       - name: Checkout the extension
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           repository: ${{ inputs.repo }}
           ref: ${{ inputs.ref }}
           path: cse
 
       - name: Download every artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
           pattern: CSE-*
